@@ -1,0 +1,738 @@
+<title>Night Ledger</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one-screen supervisor console. Header → KPI strip → three urgency lanes | handoff card + watch rail.
+   Language: Linear-style neutral surfaces (hue-biased greys, low chrome, dense alignment), Geist type,
+   semantic color reserved for lane state, motion ≤200ms ease-out only where state changes. */
+:root{
+  color-scheme: dark;
+  --bg:      oklch(0.17 0.008 265);
+  --panel:   oklch(0.20 0.009 265);
+  --raised:  oklch(0.235 0.010 265);
+  --line:    oklch(0.30 0.010 265);
+  --line-soft: oklch(0.255 0.009 265);
+  --fg:      oklch(0.95 0.004 265);
+  --fg-2:    oklch(0.74 0.008 265);
+  --fg-3:    oklch(0.56 0.010 265);
+  --accent:  oklch(0.74 0.11 255);
+  --accent-ink: oklch(0.18 0.02 255);
+  --red:     oklch(0.68 0.19 25);
+  --red-bg:  oklch(0.68 0.19 25 / 0.12);
+  --amber:   oklch(0.80 0.14 75);
+  --amber-bg:oklch(0.80 0.14 75 / 0.11);
+  --green:   oklch(0.76 0.12 160);
+  --green-bg:oklch(0.76 0.12 160 / 0.10);
+  --shadow:  0 1px 0 oklch(1 0 0 / 0.04) inset, 0 8px 24px oklch(0 0 0 / 0.25);
+  --font: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.23,1,.32,1);
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    color-scheme: light;
+    --bg: oklch(0.975 0.003 265); --panel: oklch(1 0 0); --raised: oklch(0.965 0.004 265);
+    --line: oklch(0.89 0.006 265); --line-soft: oklch(0.93 0.005 265);
+    --fg: oklch(0.22 0.012 265); --fg-2: oklch(0.42 0.012 265); --fg-3: oklch(0.56 0.010 265);
+    --accent: oklch(0.52 0.15 258); --accent-ink: oklch(0.99 0 0);
+    --red: oklch(0.56 0.20 27); --red-bg: oklch(0.56 0.20 27 / 0.09);
+    --amber: oklch(0.62 0.14 65); --amber-bg: oklch(0.70 0.14 70 / 0.13);
+    --green: oklch(0.55 0.12 160); --green-bg: oklch(0.55 0.12 160 / 0.09);
+    --shadow: 0 1px 2px oklch(0 0 0 / 0.05), 0 6px 20px oklch(0 0 0 / 0.06);
+  }
+}
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg: oklch(0.975 0.003 265); --panel: oklch(1 0 0); --raised: oklch(0.965 0.004 265);
+  --line: oklch(0.89 0.006 265); --line-soft: oklch(0.93 0.005 265);
+  --fg: oklch(0.22 0.012 265); --fg-2: oklch(0.42 0.012 265); --fg-3: oklch(0.56 0.010 265);
+  --accent: oklch(0.52 0.15 258); --accent-ink: oklch(0.99 0 0);
+  --red: oklch(0.56 0.20 27); --red-bg: oklch(0.56 0.20 27 / 0.09);
+  --amber: oklch(0.62 0.14 65); --amber-bg: oklch(0.70 0.14 70 / 0.13);
+  --green: oklch(0.55 0.12 160); --green-bg: oklch(0.55 0.12 160 / 0.09);
+  --shadow: 0 1px 2px oklch(0 0 0 / 0.05), 0 6px 20px oklch(0 0 0 / 0.06);
+}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font:13px/1.45 var(--font);-webkit-font-smoothing:antialiased;
+  padding-left:max(16px, env(safe-area-inset-left,0px));padding-right:max(16px, env(safe-area-inset-right,0px));padding-block:0}
+button{font:inherit;color:inherit;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.mono,.t{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+.app{height:100%;display:grid;grid-template-rows:auto auto 1fr;gap:12px;padding-block:12px;max-width:1600px;margin:0 auto}
+
+/* Header */
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;margin-right:auto;min-width:0}
+.mark{width:22px;height:22px;border-radius:6px;background:var(--fg);display:grid;place-items:center}
+.mark i{width:8px;height:8px;border-radius:50%;background:var(--bg);box-shadow:0 0 0 3px var(--fg),0 0 0 4px var(--bg)}
+.brand h1{font-size:14px;font-weight:600;letter-spacing:-0.01em;margin:0}
+.brand .site{color:var(--fg-3);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.clock{font-family:var(--mono);color:var(--fg-2);font-size:12px}
+.seg{display:inline-flex;padding:2px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.seg button{border:0;background:none;padding:4px 10px;border-radius:6px;color:var(--fg-2);font-size:12px}
+.seg button[aria-pressed="true"]{background:var(--raised);color:var(--fg);box-shadow:0 0 0 1px var(--line)}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:7px;padding:5px 10px;font-size:12px;color:var(--fg);display:inline-flex;align-items:center;gap:6px;transition:background .15s var(--ease)}
+.btn:hover{background:var(--raised)}
+.btn.primary{background:var(--accent);border-color:transparent;color:var(--accent-ink);font-weight:500}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn.danger{background:var(--red);border-color:transparent;color:oklch(0.99 0 0);font-weight:500}
+.btn.ghost{background:none;border-color:transparent;color:var(--fg-2)}
+.btn.ghost:hover{background:var(--raised);color:var(--fg)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.kbd{font-family:var(--mono);font-size:10.5px;color:var(--fg-3);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.surge{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--fg-2)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--fg-3);flex:none}
+.surge.on .dot{background:var(--red);box-shadow:0 0 0 3px var(--red-bg)}
+.surge.on b{color:var(--fg);font-weight:500}
+
+/* Status message banner (Slow rung) */
+.banner{display:flex;gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:12.5px;color:var(--fg-2)}
+.banner b{color:var(--fg);font-weight:500}
+.banner .tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--green)}
+
+/* Decision prompt (decision 1: surge mode) */
+.decision{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1.6fr) auto;gap:20px;align-items:center;padding:14px 16px;border:1px solid color-mix(in oklch, var(--accent) 55%, var(--line));border-radius:12px;background:color-mix(in oklch, var(--accent) 7%, var(--panel));box-shadow:var(--shadow);animation:enter .2s var(--ease) both}
+.decision .eyebrow{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);font-weight:500}
+.decision .eyebrow .dot{background:var(--accent);box-shadow:0 0 0 3px color-mix(in oklch, var(--accent) 25%, transparent)}
+.decision .eyebrow .t{color:var(--fg-3);text-transform:none;letter-spacing:0;font-weight:400}
+.decision h2{margin:4px 0 2px;font-size:18px;font-weight:600;letter-spacing:-0.02em}
+.decision p{margin:0;color:var(--fg-2);font-size:12.5px;max-width:52ch}
+.evidence{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);border-radius:9px;overflow:hidden}
+.evidence div{background:var(--panel);padding:8px 10px;min-width:0}
+.evidence b{display:block;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:18px;font-weight:500;letter-spacing:-0.02em}
+.evidence span{display:block;font-size:11.5px;color:var(--fg-3)}
+.evidence .warn b{color:var(--amber)} .evidence .calm b{color:var(--green)}
+.decision .choices{display:grid;gap:6px;justify-items:stretch;min-width:190px}
+.decision .choices .note{text-align:center}
+@media (max-width: 1100px){ .decision{grid-template-columns:minmax(0,1fr)} .decision .choices{grid-auto-flow:column;justify-content:start;min-width:0} }
+@media (max-width: 520px){ .evidence{grid-template-columns:repeat(2,minmax(0,1fr))} .decision .choices{grid-auto-flow:row;justify-content:stretch} }
+
+/* KPI strip */
+.kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+.kpi{padding:10px 14px;border-left:1px solid var(--line-soft);min-width:0}
+.kpi:first-child{border-left:0}
+.kpi .l{font-size:11px;color:var(--fg-3);letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.kpi .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:22px;font-weight:500;letter-spacing:-0.02em;margin-top:2px}
+.kpi .s{font-size:11.5px;color:var(--fg-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi.red .v{color:var(--red)} .kpi.amber .v{color:var(--amber)} .kpi.green .v{color:var(--green)}
+.lock{font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:4px;background:var(--raised);color:var(--fg-2);border:1px solid var(--line)}
+
+/* Main */
+.main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:12px;min-height:0}
+.lanes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;min-height:0}
+.lane{display:flex;flex-direction:column;min-height:0;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+.lane-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line-soft)}
+.lane-h .chip{font-size:11px;font-weight:500;padding:2px 7px;border-radius:5px;white-space:nowrap}
+.lane-h .n{font-family:var(--mono);color:var(--fg-2);font-size:12px}
+.lane-h .rule{margin-left:auto;font-size:11.5px;color:var(--fg-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lane[data-lane="red"] .chip{background:var(--red-bg);color:var(--red)}
+.lane[data-lane="amber"] .chip{background:var(--amber-bg);color:var(--amber)}
+.lane[data-lane="green"] .chip{background:var(--green-bg);color:var(--green)}
+.list{overflow:auto;flex:1;padding:4px;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin}
+.empty{color:var(--fg-3);font-size:12px;padding:18px 10px;text-align:center}
+
+.row{display:grid;grid-template-columns:3px minmax(0,1fr) auto;gap:10px;align-items:start;padding:8px 10px 8px 6px;border-radius:8px;border:1px solid transparent;background:none;text-align:left;width:100%}
+.row:hover{background:var(--raised)}
+.row[aria-selected="true"]{background:var(--raised);border-color:var(--line)}
+.row .sev{align-self:stretch;border-radius:2px;background:var(--fg-3)}
+.row[data-lane="red"] .sev{background:var(--red)}
+.row[data-lane="amber"] .sev{background:var(--amber)}
+.row[data-lane="green"] .sev{background:var(--green);opacity:.7}
+.row .who{font-weight:500;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .who span{color:var(--fg-3);font-weight:400;font-family:var(--mono);font-size:11px;margin-left:6px}
+.row .what{color:var(--fg-2);font-size:12.5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.row .st{font-size:11.5px;color:var(--fg-3);margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.row .st .pill{border:1px solid var(--line);border-radius:999px;padding:0 6px;font-size:10.5px;color:var(--fg-2)}
+.row .st .pill.live{border-color:transparent;background:var(--red-bg);color:var(--red)}
+.row .st .pill.miss{border-color:transparent;background:var(--amber-bg);color:var(--amber)}
+.row .st .pill.ok{border-color:transparent;background:var(--green-bg);color:var(--green)}
+.row .t{font-size:11.5px;color:var(--fg-3)}
+.row.done{opacity:.5}
+.row.enter{animation:enter .2s var(--ease) both}
+@keyframes enter{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.row.flash{animation:flash 1.2s var(--ease) 2}
+@keyframes flash{0%,100%{background:none}40%{background:var(--red-bg)}}
+
+/* Right rail */
+.rail{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto;scrollbar-width:thin}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.card-h{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line-soft);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3)}
+.card-h .grow{margin-left:auto;text-transform:none;letter-spacing:0;font-size:11.5px}
+.sec{padding:12px 14px;border-top:1px solid var(--line-soft);display:grid;gap:8px}
+.sec:first-of-type{border-top:0}
+.sec h3{margin:0;font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3)}
+.hand-title{display:flex;align-items:flex-start;gap:10px}
+.hand-title h2{font-size:16px;font-weight:600;letter-spacing:-0.015em;margin:0;text-wrap:balance}
+.hand-title .meta{color:var(--fg-3);font-size:12px;font-family:var(--mono)}
+.lchip{font-size:11px;font-weight:500;padding:2px 7px;border-radius:5px;white-space:nowrap}
+.lchip.red{background:var(--red-bg);color:var(--red)} .lchip.amber{background:var(--amber-bg);color:var(--amber)} .lchip.green{background:var(--green-bg);color:var(--green)}
+.summary{margin:0;padding:0;list-style:none;display:grid;gap:4px}
+.summary li{display:grid;grid-template-columns:72px 1fr;gap:8px;font-size:12.5px}
+.summary li span:first-child{color:var(--fg-3)}
+.flags{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
+.flag{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--fg-2);padding:3px 0;border-bottom:1px dashed var(--line-soft)}
+.flag b{font-family:var(--mono);font-weight:500;font-size:11px;color:var(--fg-3)}
+.flag.yes{color:var(--fg)} .flag.yes b{color:var(--red)}
+.why{display:grid;gap:6px}
+.why .r{display:grid;grid-template-columns:62px 1fr auto;gap:8px;align-items:baseline;font-size:12px}
+.why .r span:first-child{color:var(--fg-3);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.why .r .mono{font-size:11px;color:var(--fg-3)}
+.why .final{border-top:1px solid var(--line-soft);padding-top:6px;font-weight:500}
+.ladder{display:grid;grid-template-columns:repeat(5,1fr);gap:0;position:relative;margin-top:2px}
+.ladder::before{content:"";position:absolute;left:10%;right:10%;top:6px;height:2px;background:var(--line)}
+.step{display:grid;justify-items:center;gap:5px;position:relative;font-size:11px;color:var(--fg-3)}
+.step i{width:14px;height:14px;border-radius:50%;background:var(--panel);border:2px solid var(--line)}
+.step.past i{background:var(--fg-3);border-color:var(--fg-3)}
+.step.now i{background:var(--accent);border-color:var(--accent);box-shadow:0 0 0 4px color-mix(in oklch, var(--accent) 22%, transparent)}
+.step.now{color:var(--fg);font-weight:500}
+.quote{font-size:12.5px;color:var(--fg-2);display:grid;gap:4px}
+.quote p{margin:0}
+.quote b{font-weight:500;color:var(--fg-3);font-size:11px;font-family:var(--mono);margin-right:6px}
+.fifo{display:flex;gap:10px;align-items:baseline;padding:8px 10px;border-radius:8px;background:var(--raised);font-size:12px;color:var(--fg-2)}
+.fifo strong{font-family:var(--mono);font-size:15px;color:var(--fg);font-weight:500}
+.actions{display:flex;flex-wrap:wrap;gap:6px}
+.confirm{display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--raised);font-size:12.5px}
+.note{font-size:11.5px;color:var(--fg-3)}
+.log{display:grid;gap:3px;font-size:11.5px;color:var(--fg-3)}
+.log div{display:grid;grid-template-columns:58px 1fr;gap:8px}
+
+/* Watch clusters */
+.cluster{padding:12px 14px;border-top:1px solid var(--line-soft);display:grid;gap:8px}
+.cluster:first-of-type{border-top:0}
+.cluster .head{display:flex;align-items:baseline;gap:8px}
+.cluster .head b{font-weight:500}
+.cluster .head .mono{margin-left:auto;font-size:12px;color:var(--fg-2)}
+.bars{display:flex;align-items:flex-end;gap:2px;height:24px}
+.bars i{flex:1;background:var(--fg-3);opacity:.35;border-radius:1.5px;min-height:2px}
+.bars i:last-child{opacity:1;background:var(--accent)}
+.cluster .sub{font-size:12px;color:var(--fg-3)}
+
+/* Toast */
+.toasts{position:fixed;right:max(16px, env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));display:grid;gap:8px;z-index:10;max-width:min(360px, calc(100vw - 32px))}
+.toast{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:10px;background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);font-size:12.5px;animation:enter .2s var(--ease) both}
+.toast .dot{margin-top:5px;background:var(--red)}
+.toast b{font-weight:500}
+
+.foot{font-size:11px;color:var(--fg-3);display:flex;gap:12px;flex-wrap:wrap}
+
+@media (max-width: 1180px){
+  .main{grid-template-columns:minmax(0,1fr) 340px}
+  .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .kpi:nth-child(4){border-left:0}
+  .kpi:nth-child(n+4){border-top:1px solid var(--line-soft)}
+}
+@media (max-width: 1100px){
+  html,body{height:auto}
+  .app{height:auto;grid-template-rows:none}
+  .main{grid-template-columns:minmax(0,1fr)}
+  .lane .list{max-height:420px}
+  .rail{overflow:visible;display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);align-items:start}
+  .rail .foot{grid-column:1/-1}
+}
+@media (max-width: 760px){
+  .lanes{grid-template-columns:minmax(0,1fr)}
+  .lane .list{max-height:320px}
+  .rail{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width: 520px){
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .kpi:nth-child(n){border-left:0;border-top:1px solid var(--line-soft)}
+  .kpi:nth-child(-n+2){border-top:0}
+  .kpi:nth-child(even){border-left:1px solid var(--line-soft)}
+  .flags{grid-template-columns:1fr}
+  .hide-sm{display:none}
+}
+@media (prefers-reduced-motion: reduce){
+  .row.enter,.row.flash,.toast{animation:none}
+  .btn{transition:none}
+}
+</style>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"><i></i></div>
+      <h1>Night Ledger</h1>
+      <span class="site">St. Anselm Medical Center · Main line</span>
+    </div>
+    <div class="seg" role="group" aria-label="Scenario">
+      <button id="mode-surge" aria-pressed="true">2 AM earthquake</button>
+      <button id="mode-tue" aria-pressed="false">Ordinary Tuesday</button>
+    </div>
+    <span class="surge" id="surge"><span class="dot"></span><span id="surge-text">Surge mode off · after-hours answering</span></span>
+    <span class="clock" id="clock">02:06:00</span>
+    <button class="btn" id="pause" aria-pressed="false"><span id="pause-l">Pause</span> <span class="kbd hide-sm">Space</span></button>
+    <button class="btn ghost" id="restart">Restart</button>
+  </header>
+
+  <div style="display:grid;gap:12px">
+    <section class="decision" id="decision" hidden aria-live="polite"></section>
+    <div class="banner" id="banner" hidden><span class="tag">Live</span><span><b>Status message playing to every caller:</b> <span id="banner-text"></span></span><button class="btn ghost" id="banner-off" style="margin-left:auto">Stop message</button></div>
+    <section class="kpis" aria-label="Line summary">
+      <div class="kpi"><div class="l">On the line</div><div class="v" id="k-active">0</div><div class="s" id="k-active-s">calls in the last 20 min</div></div>
+      <div class="kpi red"><div class="l">Now</div><div class="v" id="k-red">0</div><div class="s">red flag, going to a person</div></div>
+      <div class="kpi amber"><div class="l">A person soon</div><div class="v" id="k-amber">0</div><div class="s" id="k-amber-s">callback queue</div></div>
+      <div class="kpi green"><div class="l">Can wait</div><div class="v" id="k-green">0</div><div class="s" id="k-green-s">scheduled callback</div></div>
+      <div class="kpi"><div class="l">Time to a person</div><div class="v" id="k-tth">–</div><div class="s">median, red-flag calls</div></div>
+      <div class="kpi"><div class="l">AI downgrades <span class="lock">locked</span></div><div class="v">0</div><div class="s">only a person can lower a lane</div></div>
+    </section>
+  </div>
+
+  <main class="main">
+    <section class="lanes" aria-label="Urgency lanes">
+      <div class="lane" data-lane="red">
+        <div class="lane-h"><span class="chip">Now</span><span class="n" id="n-red">0</span><span class="rule">Any red-flag yes · warm transfer &lt;10s</span></div>
+        <div class="list" id="l-red" role="listbox" aria-label="Now lane"></div>
+      </div>
+      <div class="lane" data-lane="amber">
+        <div class="lane-h"><span class="chip">A person soon</span><span class="n" id="n-amber">0</span><span class="rule">Never automated · callback ≤15 min</span></div>
+        <div class="list" id="l-amber" role="listbox" aria-label="A person soon lane"></div>
+      </div>
+      <div class="lane" data-lane="green">
+        <div class="lane-h"><span class="chip">Can wait</span><span class="n" id="n-green">0</span><span class="rule">Status message · scheduled callback</span></div>
+        <div class="list" id="l-green" role="listbox" aria-label="Can wait lane"></div>
+      </div>
+    </section>
+
+    <aside class="rail">
+      <section class="card" id="hand" aria-live="polite"></section>
+      <section class="card">
+        <div class="card-h">Watch · what callers keep asking <span class="grow">last 10 min</span></div>
+        <div id="clusters"></div>
+      </section>
+      <div class="foot"><span><span class="kbd">J</span> <span class="kbd">K</span> move</span><span><span class="kbd">U</span> move up a lane</span><span>Simulated calls. Names and numbers are fictional.</span></div>
+    </aside>
+  </main>
+</div>
+<div class="toasts" id="toasts" aria-live="assertive"></div>
+
+<script>
+(() => {
+const $ = s => document.querySelector(s);
+const LANES = ['red','amber','green'];
+const LANE_NAME = {red:'Now', amber:'A person soon', green:'Can wait'};
+const SCREEN = [['breath','Trouble breathing'],['chest','Chest pain or pressure'],['stroke','Face droop, weak arm, slurred speech'],['bleed','Heavy bleeding'],['harm','Thoughts of self-harm'],['od','Overdose or poisoning']];
+const STAFF = {red:'R. Okafor, RN', amber:'K. Mensah (house sup.)'};
+const AVG_CALL_MIN = 3.4, HUMANS_ON_PHONES = 2;
+
+// Scripted caller situations. lane = higher of (rules, LLM intent).
+const SURGE = [
+  {w:9, lane:'green', cl:'outage', intent:'Asking if the ER is open', llm:['status question',.94], q:['Is the emergency room still open with the power out?','Yes, the ER is open and running on backup power.']},
+  {w:7, lane:'green', cl:'outage', intent:'Power out, asking if tomorrow’s appointment is still on', llm:['scheduling',.91], q:['My MRI is at 8 tomorrow, is that still happening?','I’ll book a callback to confirm once the schedule is set.']},
+  {w:6, lane:'amber', cl:'family', intent:'Looking for brother, may have been brought in after the building collapse', llm:['family locating',.89], why:'Family reunification goes to a person', q:['My brother lives on Alder Street, the building came down. Is he there?','I can’t share patient information, but a staff member will call you back. Can I take his name and what he looks like?']},
+  {w:5, lane:'green', cl:'help', intent:'Offering to donate blood', llm:['offer of help',.96], q:['Do you need blood donors tonight?','Thank you. I’ll send you a text with the donation sign-up link.']},
+  {w:4, lane:'green', cl:'help', intent:'Off-duty nurse offering to come in', llm:['offer of help',.90], q:['I’m an ICU nurse, off tonight. Should I come in?','I’ll pass your name and number to the staffing desk right now.']},
+  {w:3, lane:'amber', cl:'family', intent:'Wife was in the ER waiting room, not answering her phone', llm:['family locating',.87], why:'Family reunification goes to a person', q:['She texted me she was in your ER, now nothing.','A staff member will call you back. What’s her name and date of birth?']},
+  {w:3, lane:'amber', intent:'Caller repeats questions, seems confused about where they are', llm:['unclear',.41], why:'Caller sounds confused or impaired', conf:.38, q:['Which… what is this? I need the bus.','I want to get you to a person. Can you tell me your name?']},
+  {w:2, lane:'amber', intent:'Says they can’t stop shaking since the quake, scared to stay home alone', llm:['emotional distress',.83], why:'Mental health always goes to a person', q:['I can’t stop shaking. I don’t want to be alone.','You’re not alone on this call. Are you having any thoughts of hurting yourself?']},
+  {w:2, lane:'amber', intent:'14-month-old coughing, no fever, parent worried about dust', llm:['child symptom',.80], why:'Child under 2 always goes to a person', q:['My baby keeps coughing, there was dust everywhere.','A nurse will call you back within 15 minutes. Is she breathing hard or turning blue?']},
+  {w:2, lane:'amber', intent:'Asked for a human', llm:['request human',.97], why:'Caller asked for a person', q:['Just put me through to a real person please.','Of course. A staff member will call you back. Can I confirm your number?']},
+  {w:1, lane:'amber', intent:'Spanish speaker, transcription unclear', llm:['unclear',.35], why:'Low transcription confidence', conf:.31, q:['…mi mamá… el oxígeno no…','Le comunico con una persona. ¿Me puede dar su número?']},
+  {w:2, lane:'green', cl:'media', intent:'Reporter asking for a statement', llm:['media',.95], why:'Routed to public information officer', q:['Channel 4 news, how many patients have you received?','I’ll pass your request to our public information officer.']},
+  {w:2, lane:'green', cl:'outage', intent:'Patient portal down, can’t see test results', llm:['portal help',.92], q:['MyChart isn’t loading.','The portal is down with the outage. I’ll text you when it’s back.']},
+  {w:1, lane:'red', flags:['bleed'], intent:'Neighbor cut by glass, bleeding won’t stop', llm:['injury',.88], q:['There’s blood everywhere, it won’t stop.','I’m connecting you to a nurse now. Press firmly on the wound.']},
+  {w:1, lane:'red', flags:['breath'], intent:'Smoke in the apartment, father wheezing', llm:['breathing problem',.90], q:['He can’t catch his breath, there’s smoke.','I’m connecting you to a nurse now. Get him to fresh air if you can.']},
+];
+const CHEST = {lane:'red', flags:['chest'], intent:'Father has chest pressure and is sweating, 71 years old', llm:['status question',.52], q:['I was calling to ask if you’re open… my dad says his chest feels tight and he’s sweaty.','I’m connecting you to a nurse right now. Stay on the line.'], star:true};
+const TUESDAY = [
+  {w:6, lane:'green', intent:'Prescription refill question', llm:['refill',.95], q:['Can I get my lisinopril refilled?','I’ll send a refill request. The pharmacy team will confirm in the morning.']},
+  {w:5, lane:'green', intent:'Reschedule Thursday appointment', llm:['scheduling',.97], q:['I need to move my Thursday visit.','I can offer Friday at 10:20 or Monday at 9.']},
+  {w:4, lane:'green', intent:'Billing question about a statement', llm:['billing',.93], q:['My bill says I owe $340, I thought insurance covered it.','I’ll schedule a callback from billing tomorrow between 9 and 11.']},
+  {w:3, lane:'green', intent:'Visiting hours and parking', llm:['visitor info',.98], q:['Can I visit my mom tonight?','Visiting ends at 9 pm. Overnight, one adult can stay with ICU patients.']},
+  {w:2, lane:'amber', intent:'Discharged yesterday, unsure about new medication dose', llm:['medication question',.86], why:'Recent discharge with a medication question goes to a nurse', q:['They gave me a new blood thinner, I can’t remember if it’s one or two.','A nurse will call you back within 15 minutes. Please don’t take another dose until then.']},
+  {w:1, lane:'red', flags:['bleed'], intent:'Post-op wound bleeding through the dressing', llm:['post-op question',.70], q:['My incision is soaking through the bandage.','I’m connecting you to the on-call nurse now.']},
+];
+const FIRST = ['Maria','James','Aisha','Daniel','Priya','Luis','Hannah','Omar','Grace','Tomás','Mei','Samuel','Fatima','Noah','Rosa','Ethan','Yara','Victor','Leah','Kwame','Ana','Ben','Sofia','Imran','Chloe','Diego','Nadia','Owen','Rina','Marcus'];
+const LAST = 'ABCDEFGHJKLMNOPRSTVWY';
+
+let state;
+function fresh(mode){
+  const clock = mode==='surge'? (2*3600+6*60) : (21*3600+42*60);
+  return {mode, calls:[], n:0, sel:null, t0:Date.now(), clock, paused:false,
+    banner:null, confirm:null, nextIn:6, resolvedByBanner:0, tth:[], buckets:{}, tick:0,
+    surge:false, surgeAt:null, quakeAt: clock+10, prompt:null, snoozeUntil:0, hung:0};
+}
+function pick(list){ const tot=list.reduce((a,b)=>a+b.w,0); let r=Math.random()*tot; for(const x of list){ if((r-=x.w)<=0) return x; } return list[0]; }
+function name(){ return FIRST[Math.floor(Math.random()*FIRST.length)]+' '+LAST[Math.floor(Math.random()*LAST.length)]+'.'; }
+function fmt(s){ s=Math.max(0,Math.floor(s)); const m=Math.floor(s/60), x=s%60; return m+':'+String(x).padStart(2,'0'); }
+function clockStr(s){ s=Math.floor(s)%86400; const h=Math.floor(s/3600), m=Math.floor(s/60)%60, x=s%60; return [h,m,x].map(v=>String(v).padStart(2,'0')).join(':'); }
+
+function addCall(tpl, opts={}){
+  const n = ++state.n;
+  const c = {
+    id:'c'+n, n, who:name(), last4:String(1000+Math.floor(Math.random()*9000)),
+    ...tpl, flags:tpl.flags||[], at:state.clock - (opts.ago||0), lane:tpl.lane,
+    status: tpl.lane==='red' ? 'screen' : !state.surge && !opts.ago ? 'hold' : tpl.lane==='amber' ? 'queued' : 'scheduled',
+    misses:0, log:[], done:false, isNew:!opts.ago, patience: 25+Math.floor(Math.random()*50)
+  };
+  c.log.push([c.at, 'Answered by AI. Disclosed AI, offered a person.']);
+  c.log.push([c.at+12, c.flags.length ? 'Red-flag screen: '+c.flags.map(f=>SCREEN.find(s=>s[0]===f)[1].toLowerCase()).join(', ')+' = yes' : 'Red-flag screen: all no']);
+  if (tpl.lane==='green' && state.banner && tpl.cl==='outage' && Math.random()<.6){
+    c.status='resolved'; c.done=true; state.resolvedByBanner++;
+    c.log.push([c.at+20,'Heard status message, ended call satisfied']);
+  }
+  if (opts.age!=null){ advance(c, opts.age); }
+  state.calls.push(c);
+  const b = Math.floor((state.clock - (opts.ago||0))/60); if (tpl.cl) { state.buckets[tpl.cl] ??= {}; state.buckets[tpl.cl][b]=(state.buckets[tpl.cl][b]||0)+1; }
+  if (c.lane==='red' && !opts.ago){
+    toast(`<b>Red flag · ${c.who}</b><br>${c.intent}. Going to ${STAFF.red}.`);
+    if (state.sel==null || laneOf(state.sel)!=='red') state.sel=c.id;
+  }
+  return c;
+}
+function laneOf(id){ const c=state.calls.find(x=>x.id===id); return c&&c.lane; }
+
+// red-call lifecycle: screen (0-3s) → transferring (3-7s) → with nurse
+function advance(c, age){
+  if (c.lane!=='red' || c.done) return;
+  if (age>=3 && c.status==='screen'){ c.status='transfer'; c.log.push([c.at+3,'Warm transfer started with handoff card']); }
+  if (age>=7 && c.status==='transfer'){ c.status='human'; c.tth=7; state.tth.push(7); c.log.push([c.at+7,'Connected to '+STAFF.red]); }
+  if (age>=60 && c.status==='human'){ c.done=true; c.status='closed'; }
+}
+
+function seed(){
+  if (state.mode==='surge'){
+    // a normal quiet night before the earthquake: a handful of after-hours calls
+    for (let i=0;i<4;i++){ const ago = (4-i)*540; addCall(pick(TUESDAY.filter(t=>t.lane!=='red')), {ago, age:ago}); }
+    state.calls.slice(0,3).forEach(c=>{c.done=true;c.status='called back';});
+  } else {
+    for (let i=0;i<5;i++){ const ago = (5-i)*260; addCall(pick(TUESDAY.filter(t=>t.lane!=='red')), {ago, age:ago}); }
+  }
+  state.sel = (state.calls.filter(c=>!c.done && c.lane==='amber')[0]||state.calls[0]).id;
+}
+
+/* ---------- rendering ---------- */
+function statusPill(c){
+  if (c.lane==='red'){
+    if (c.status==='screen') return '<span class="pill live">Screening</span>';
+    if (c.status==='transfer') return '<span class="pill live">Transferring</span>';
+    if (c.status==='human') return `<span class="pill ok">With ${STAFF.red.split(',')[0]} · ${fmt(c.tth)}</span>`;
+    return '<span class="pill">Closed</span>';
+  }
+  if (c.status==='hold') return '<span class="pill miss">On hold for a person</span>';
+  if (c.status==='hung') return `<span class="pill">Hung up after ${fmt(c.hungAfter)} on hold</span>`;
+  if (c.lane==='amber'){
+    if (c.status==='human') return '<span class="pill ok">Calling back</span>';
+    if (c.misses) return `<span class="pill miss">No answer ×${c.misses}</span>`;
+    if (c.done) return '<span class="pill">Called back</span>';
+    return '<span class="pill">Callback ≤15 min</span>';
+  }
+  if (c.status==='resolved') return '<span class="pill ok">Answered by status message</span>';
+  if (c.done) return '<span class="pill">Called back</span>';
+  return '<span class="pill">Callback 06:00–08:00</span>';
+}
+function rowHTML(c){
+  const reason = c.lane==='red' ? 'Red flag' : (c.why || (c.cl==='outage'?'Outage question':c.cl==='help'?'Offer of help':'Routine'));
+  return `<button class="row${c.done?' done':''}${c.isNew?' enter':''}${c.star&&c.isNew?' flash':''}" role="option" data-id="${c.id}" data-lane="${c.lane}" aria-selected="${state.sel===c.id}">
+    <span class="sev"></span>
+    <span style="min-width:0"><div class="who">${c.who}<span>#${c.n} · ••${c.last4.slice(2)}</span></div>
+    <div class="what">${c.intent}</div>
+    <div class="st">${statusPill(c)}<span>${reason}</span></div></span>
+    <span class="t" data-since="${c.at}">${fmt(state.clock-c.at)}</span></button>`;
+}
+function renderLanes(){
+  const order = {screen:0,transfer:1,human:2,queued:1,missed:0,scheduled:1,hold:1};
+  for (const L of LANES){
+    const items = state.calls.filter(c=>c.lane===L).sort((a,b)=> (a.done-b.done) || ((order[a.status]??3)-(order[b.status]??3)) || (a.at-b.at));
+    const active = items.filter(c=>!c.done).length;
+    $('#n-'+L).textContent = active;
+    const shown = items.slice(0, 60);
+    $('#l-'+L).innerHTML = shown.length ? shown.map(rowHTML).join('') :
+      `<div class="empty">${L==='red'?'No red-flag calls. Every caller is screened first.':'Nothing waiting.'}</div>`;
+  }
+  state.calls.forEach(c=>c.isNew=false);
+}
+function renderKPIs(){
+  const recent = state.calls.filter(c=>state.clock-c.at < 1200);
+  const act = state.calls.filter(c=>!c.done);
+  $('#k-active').textContent = recent.length;
+  const hold = act.filter(c=>c.status==='hold').length;
+  $('#k-active-s').textContent = !state.surge && (hold || state.hung) ? `last 20 min · ${hold} on hold · ${state.hung} hung up`
+    : state.surge ? `calls in the last 20 min · ${act.length} open` : `calls in the last 20 min · after hours`;
+  $('#k-red').textContent = act.filter(c=>c.lane==='red' && c.status!=='human').length;
+  const amb = act.filter(c=>c.lane==='amber');
+  $('#k-amber').textContent = amb.length;
+  const miss = amb.filter(c=>c.misses).length;
+  $('#k-amber-s').textContent = !state.surge && amb.some(c=>c.status==='hold') ? 'waiting on hold' : miss ? `callback queue · ${miss} no answer` : 'callback queue';
+  $('#k-green').textContent = act.filter(c=>c.lane==='green').length;
+  $('#k-green-s').textContent = state.resolvedByBanner ? `${state.resolvedByBanner} answered by status message` : !state.surge && act.some(c=>c.lane==='green' && c.status==='hold') ? 'waiting on hold' : 'scheduled callback';
+  const t = state.tth.slice().sort((a,b)=>a-b);
+  $('#k-tth').textContent = t.length ? '0:'+String(t[Math.floor(t.length/2)]).padStart(2,'0') : '–';
+}
+function ladderStage(c){
+  if (c.lane==='red') return c.status==='screen'?1:4;
+  if (c.lane==='amber') return c.status==='human'?4:3;
+  return c.status==='resolved'?2:3;
+}
+function renderHand(){
+  const c = state.calls.find(x=>x.id===state.sel);
+  const el = $('#hand');
+  if (!c){ el.innerHTML = `<div class="card-h">Handoff card</div><div class="sec"><p class="note">Pick a call to see who is calling, what they answered, and why they are in that lane.</p></div>`; return; }
+  const stage = ladderStage(c);
+  const steps = ['Watch','Ask','Slow','Hold','Hand'].map((s,i)=>`<div class="step ${i<stage?'past':''} ${i===stage?'now':''}"><i></i>${s}</div>`).join('');
+  const ruleLane = c.flags.length ? 'red' : (c.why && c.lane!=='green' ? 'amber' : 'green');
+  const llmLane = c.llm[1] < .5 ? 'amber' : (c.lane==='red' && !c.flags.length ? 'red' : (c.lane==='amber' ? 'amber':'green'));
+  const llmShown = c.star ? 'green' : llmLane;
+  const ahead = state.calls.filter(x=>!x.done && x.at < c.at && x.id!==c.id && x.lane!=='red').length;
+  const fifo = c.lane==='red' ? `<div class="fifo"><span>In a first-come queue</span><strong>${ahead} ahead</strong><span>≈ ${Math.round(ahead*AVG_CALL_MIN/HUMANS_ON_PHONES)} min wait</span></div>
+    <p class="note">Based on ${AVG_CALL_MIN} min average call and ${HUMANS_ON_PHONES} people on the phones.</p>` : '';
+  let actions = '';
+  if (state.confirm && state.confirm.id===c.id){
+    actions = `<div class="confirm"><span>${state.confirm.text}</span><div class="actions"><button class="btn primary" data-act="confirm">${state.confirm.yes}</button><button class="btn" data-act="cancel">Cancel</button></div></div>`;
+  } else if (c.done){
+    actions = `<p class="note">This call is closed.</p>`;
+  } else if (c.lane==='red'){
+    actions = `<div class="actions"><button class="btn primary" data-act="take">Take this call</button><button class="btn" data-act="close">Mark handled</button></div>
+      <p class="note">If no one answers in 30 seconds the AI tells the caller to hang up and dial 911, then alerts you.</p>`;
+  } else if (c.lane==='amber'){
+    actions = `<div class="actions"><button class="btn primary" data-act="callback">Call back now</button><button class="btn" data-act="noanswer">No answer</button><button class="btn" data-act="up">Move to Now</button><button class="btn ghost" data-act="down">Lower lane…</button></div>`;
+  } else {
+    actions = `<div class="actions"><button class="btn" data-act="up">Move to A person soon</button><button class="btn" data-act="close">Mark resolved</button></div>`;
+  }
+  el.innerHTML = `
+    <div class="card-h">Handoff card <span class="grow mono">#${c.n} · arrived ${clockStr(c.at).slice(0,5)}</span></div>
+    <div class="sec">
+      <div class="hand-title"><div style="flex:1;min-width:0"><h2>${c.who}</h2><div class="meta">(555) 01${c.last4.slice(0,1)}-${c.last4} · waited <span class="t" data-since="${c.at}">${fmt(state.clock-c.at)}</span></div></div><span class="lchip ${c.lane}">${LANE_NAME[c.lane]}</span></div>
+      <ul class="summary">
+        <li><span>Calling</span><span>${c.intent}</span></li>
+        <li><span>Status</span><span>${statusPill(c).replace(/<[^>]+>/g,'')}</span></li>
+        ${c.conf?`<li><span>Heard</span><span>Transcription confidence ${Math.round(c.conf*100)}%</span></li>`:''}
+      </ul>
+      ${fifo}
+    </div>
+    <div class="sec"><h3>Red-flag screen</h3>
+      <div class="flags">${SCREEN.map(([k,l])=>`<div class="flag ${c.flags.includes(k)?'yes':''}">${l}<b>${c.flags.includes(k)?'YES':'no'}</b></div>`).join('')}</div>
+    </div>
+    <div class="sec"><h3>Why this lane</h3>
+      <div class="why">
+        <div class="r"><span>Rules</span><span>${c.flags.length?'Red-flag answer':(c.why||'No rule fired')}</span><span class="lchip ${ruleLane}">${LANE_NAME[ruleLane]}</span></div>
+        <div class="r"><span>Model</span><span>Intent: ${c.llm[0]} <span class="mono">${c.llm[1].toFixed(2)}</span></span><span class="lchip ${llmShown}">${LANE_NAME[llmShown]}</span></div>
+        <div class="r final"><span>Result</span><span>Higher of the two${c.star?'. The model alone would have missed this.':''}${c.moved?'. '+c.moved:''}</span><span class="lchip ${c.lane}">${LANE_NAME[c.lane]}</span></div>
+      </div>
+    </div>
+    <div class="sec"><h3>What was said</h3><div class="quote"><p><b>CALLER</b>${c.q[0]}</p><p><b>AI</b>${c.q[1]}</p></div></div>
+    <div class="sec"><h3>Ladder</h3><div class="ladder">${steps}</div></div>
+    <div class="sec">${actions}</div>
+    <div class="sec"><h3>Log</h3><div class="log">${c.log.slice(-5).map(([t,m])=>`<div><span class="mono">${clockStr(t)}</span><span>${m}</span></div>`).join('')}</div></div>`;
+}
+const CLUSTERS = {
+  outage:{label:'Outage and “are you open?”', msg:'We know about the power outage. The emergency room is open on backup power. Tomorrow’s appointments will be confirmed by text.'},
+  family:{label:'Looking for a family member', msg:null},
+  help:{label:'Offers to help', msg:'Thank you for offering to help. Text DONATE to get the blood drive sign-up link.'},
+  media:{label:'Media requests', msg:null},
+};
+function renderClusters(){
+  const nowMin = Math.floor(state.clock/60);
+  const items = Object.entries(state.buckets).map(([k,b])=>{
+    const series = Array.from({length:10},(_,i)=>b[nowMin-9+i]||0);
+    const total = series.reduce((a,x)=>a+x,0);
+    const red = state.calls.filter(c=>c.cl===k && c.lane==='red').length;
+    return {k,series,total,red};
+  }).filter(x=>x.total>0).sort((a,b)=>b.total-a.total);
+  if (!items.length){ $('#clusters').innerHTML = `<div class="cluster"><span class="sub">No repeated questions yet. Clusters appear when several callers ask the same thing.</span></div>`; return; }
+  const max = Math.max(...items.flatMap(x=>x.series),1);
+  $('#clusters').innerHTML = items.map(x=>{
+    const C = CLUSTERS[x.k];
+    const live = state.banner===x.k;
+    let act = '';
+    if (state.confirm && state.confirm.cluster===x.k){
+      act = `<div class="confirm"><span>Play this to every caller before the screen?<br><span class="note">“${C.msg}”</span></span><div class="actions"><button class="btn primary" data-act="confirm">Play status message</button><button class="btn" data-act="cancel">Cancel</button></div></div>`;
+    } else if (C.msg && !live && !state.surge){
+      act = `<span class="sub">A status message can be played once surge mode is on.</span>`;
+    } else if (C.msg && !live){
+      act = `<div class="actions"><button class="btn" data-cluster="${x.k}">Play a status message…</button></div>`;
+    } else if (live){
+      act = `<span class="sub">Status message live · ${state.resolvedByBanner} callers answered without waiting</span>`;
+    } else if (x.k==='family'){
+      act = `<span class="sub">Routed to the callback queue. Nothing about patients is shared by the AI.</span>`;
+    } else {
+      act = `<span class="sub">Sent to the public information officer.</span>`;
+    }
+    return `<div class="cluster"><div class="head"><b>${C.label}</b><span class="mono">${x.total} calls · ${x.red} red</span></div>
+      <div class="bars" aria-hidden="true">${x.series.map(v=>`<i style="height:${Math.max(8,v/max*100)}%"></i>`).join('')}</div>${act}</div>`;
+  }).join('');
+}
+function renderTimers(){
+  document.querySelectorAll('[data-since]').forEach(e=>{ e.textContent = fmt(state.clock - Number(e.dataset.since)); });
+  $('#clock').textContent = clockStr(state.clock);
+}
+function render(){ renderLanes(); renderKPIs(); renderHand(); renderClusters(); renderTimers(); renderBanner(); renderSurge(); renderDecision(); }
+function renderSurge(){
+  $('#surge').classList.toggle('on', state.surge);
+  $('#surge-text').innerHTML = state.surge ? `<b>Surge mode on</b> · switched on by K. Mensah ${clockStr(state.surgeAt).slice(0,5)}`
+    : 'Surge mode off · after-hours answering';
+}
+function renderBanner(){
+  const b=$('#banner'); b.hidden=!state.banner;
+  if (state.banner) $('#banner-text').textContent = CLUSTERS[state.banner].msg;
+}
+
+function toast(html){
+  const t=document.createElement('div'); t.className='toast'; t.innerHTML=`<span class="dot"></span><span>${html}</span>`;
+  $('#toasts').appendChild(t); setTimeout(()=>t.remove(), 5000);
+}
+
+/* ---------- simulation ---------- */
+function tick(){
+  if (state.paused) return;
+  state.clock += 1; state.tick++;
+  let changed=false;
+  for (const c of state.calls){
+    const before=c.status+c.done;
+    advance(c, state.clock-c.at);
+    if (c.lane==='amber' && !c.done && c.status==='human' && state.clock-(c.cbAt||0)>40){ c.done=true; c.log.push([state.clock,'Callback completed by '+STAFF.amber]); }
+    if (c.lane==='green' && !c.done && state.clock-c.at>420 && Math.random()<.01){ c.done=true; c.status='called back'; }
+    // without surge mode, callers wait on hold for a person, and some give up
+    if (c.status==='hold' && state.clock-c.at > c.patience){
+      c.done=true; c.status='hung'; c.hungAfter=state.clock-c.at; state.hung++;
+      c.log.push([state.clock,'Hung up after '+fmt(c.hungAfter)+' on hold']);
+    }
+    if (before!==c.status+c.done) changed=true;
+  }
+  if (--state.nextIn<=0){
+    const quake = state.mode==='surge' && state.clock>=state.quakeAt;
+    state.nextIn = quake ? 1+Math.floor(Math.random()*2) : 12+Math.floor(Math.random()*8);
+    let tpl;
+    if (quake && state.n===36) tpl = CHEST;
+    else if (quake) tpl = pick(SURGE.filter(t=>t.lane!=='red' || Math.random()<.35));
+    else tpl = pick(state.mode==='surge' ? TUESDAY.filter(t=>t.lane!=='red') : TUESDAY);
+    addCall(tpl); changed=true;
+  }
+  checkDecision();
+  // keep the board readable: drop long-closed calls
+  if (state.calls.length>140) state.calls = state.calls.filter(c=>!c.done || state.clock-c.at<900);
+  if (changed){ renderLanes(); renderKPIs(); renderHand(); renderClusters(); }
+  renderTimers();
+}
+
+/* ---------- decision 1: switch on surge mode ---------- */
+const NORMAL_PER_3MIN = 1;   // typical 2 AM volume on this line
+function evidence(){
+  const recent = state.calls.filter(c=>state.clock-c.at < 180);
+  return {
+    recent: recent.length,
+    ratio: Math.round(recent.length / NORMAL_PER_3MIN),
+    outage: recent.filter(c=>c.cl==='outage').length,
+    hold: state.calls.filter(c=>c.status==='hold').length,
+    red: state.calls.filter(c=>c.lane==='red' && !c.done).length,
+  };
+}
+function checkDecision(){
+  if (state.mode!=='surge' || state.surge || state.clock < state.snoozeUntil) return;
+  const e = evidence();
+  if (!state.prompt && e.recent >= 18){ state.prompt = {at: state.clock, again: state.snoozeUntil>0}; renderDecision(); }
+  else if (state.prompt) updateDecision();
+}
+function renderDecision(){
+  const el = $('#decision');
+  el.hidden = !state.prompt;
+  if (!state.prompt) return;
+  const again = state.prompt.again ? ' Asked again: volume is still high.' : '';
+  el.innerHTML = `
+    <div>
+      <div class="eyebrow"><span class="dot"></span>Needs your decision <span class="t">· raised <span data-since="${state.prompt.at}">0:00</span> ago</span></div>
+      <h2>Switch on surge mode?</h2>
+      <p>Call volume is far above normal for this hour.${again} Surge mode stops callers waiting on hold: each one gets a callback time instead. Red-flag calls already go straight to a nurse, with or without it.</p>
+    </div>
+    <div class="evidence" aria-label="Why you are being asked">
+      <div><b id="ev-recent">0</b><span>calls in 3 min <span id="ev-ratio"></span></span></div>
+      <div><b id="ev-outage">0</b><span>about the outage or ER</span></div>
+      <div class="warn"><b id="ev-hold">0</b><span>on hold · <span id="ev-hung">0</span> hung up</span></div>
+      <div class="calm"><b id="ev-red">0</b><span>red flags, already with a nurse</span></div>
+    </div>
+    <div class="choices">
+      <button class="btn primary" data-act="surge-on">Switch on surge mode</button>
+      <button class="btn" data-act="surge-later">Not yet, ask in 2 min</button>
+    </div>`;
+  updateDecision();
+}
+function updateDecision(){
+  if (!state.prompt) return;
+  const e = evidence();
+  const set = (id,v)=>{ const n=$(id); if(n) n.textContent=v; };
+  set('#ev-recent', e.recent); set('#ev-ratio', `(normal ≈ ${NORMAL_PER_3MIN})`);
+  set('#ev-outage', e.outage); set('#ev-hold', e.hold); set('#ev-hung', state.hung); set('#ev-red', e.red);
+}
+function switchSurgeOn(){
+  state.surge = true; state.surgeAt = state.clock; state.prompt = null;
+  let moved = 0, recovered = 0;
+  for (const c of state.calls){
+    if (c.status==='hold'){ c.status = c.lane==='amber'?'queued':'scheduled'; moved++; c.log.push([state.clock,'Surge mode: taken off hold, callback promised']); }
+    else if (c.status==='hung'){ c.done=false; c.status = c.lane==='amber'?'queued':'scheduled'; recovered++; c.log.push([state.clock,'Surge mode: callback scheduled to the number they called from']); }
+  }
+  toast(`<b>Surge mode on</b><br>${moved} callers taken off hold. ${recovered} who hung up will get a callback.`);
+  render();
+}
+
+/* ---------- interactions ---------- */
+document.addEventListener('click', e=>{
+  const row = e.target.closest('.row');
+  if (row){ state.sel=row.dataset.id; state.confirm=null; document.querySelectorAll('.row[aria-selected="true"]').forEach(r=>r.setAttribute('aria-selected','false')); row.setAttribute('aria-selected','true'); renderHand(); return; }
+  const cl = e.target.closest('[data-cluster]');
+  if (cl){ state.confirm={cluster:cl.dataset.cluster}; renderClusters(); return; }
+  const a = e.target.closest('[data-act]'); if (!a) return;
+  const c = state.calls.find(x=>x.id===state.sel);
+  const act=a.dataset.act;
+  if (act==='surge-on'){ switchSurgeOn(); return; }
+  if (act==='surge-later'){
+    state.snoozeUntil = state.clock+120; state.prompt = null; renderDecision();
+    toast(`<b>Surge mode stays off</b><br>You’ll be asked again at ${clockStr(state.snoozeUntil).slice(0,5)} if volume is still high.`);
+    return;
+  }
+  if (act==='cancel'){ state.confirm=null; renderHand(); renderClusters(); return; }
+  if (act==='confirm'){
+    const k=state.confirm;
+    state.confirm=null;
+    if (k.cluster){ state.banner=k.cluster; toast(`<b>Status message is live</b><br>Played to every new caller before the screen.`); }
+    else if (k.down && c){ c.lane=k.down; c.moved='Lowered by K. Mensah'; c.log.push([state.clock,'Lane lowered by K. Mensah (person)']); }
+    render(); return;
+  }
+  if (!c) return;
+  if (act==='take'){ c.status='human'; c.tth = c.tth || Math.max(1,state.clock-c.at); c.log.push([state.clock,'K. Mensah took the call']); }
+  if (act==='close'){ c.done=true; c.status = c.lane==='green'?'called back':'closed'; c.log.push([state.clock,'Marked handled by K. Mensah']); }
+  if (act==='callback'){ c.status='human'; c.cbAt=state.clock; c.log.push([state.clock,'Callback started by K. Mensah']); }
+  if (act==='noanswer'){
+    c.misses++; c.status='missed';
+    c.log.push([state.clock, c.misses===1?'Callback attempt 1: no answer. SMS sent, retry in 5 min.':'Callback attempt 2: no answer. Flagged at top of queue.']);
+    if (c.misses>=2) toast(`<b>${c.who} hasn’t picked up twice</b><br>Kept at the top of A person soon. Consider a welfare check.`);
+  }
+  if (act==='up'){ const to = c.lane==='green'?'amber':'red'; c.lane=to; c.status= to==='red'?'transfer':'queued'; c.at = c.at; c.moved='Moved up by K. Mensah'; c.log.push([state.clock,'Moved up to '+LANE_NAME[to]]); if(to==='red'){c.status='human'; c.tth=Math.max(1,state.clock-c.at);} }
+  if (act==='down'){ state.confirm={id:c.id, down:'green', text:'Only a person can lower a lane. Move this caller to Can wait?', yes:'Lower to Can wait'}; renderHand(); return; }
+  render();
+});
+$('#banner-off').addEventListener('click',()=>{ state.banner=null; render(); });
+function setMode(m){
+  state = fresh(m); seed();
+  $('#mode-surge').setAttribute('aria-pressed', m==='surge'); $('#mode-tue').setAttribute('aria-pressed', m!=='surge');
+  $('#pause-l').textContent='Pause'; $('#pause').setAttribute('aria-pressed',false);
+  render();
+}
+$('#restart').addEventListener('click',()=>setMode(state.mode));
+$('#mode-surge').addEventListener('click',()=>setMode('surge'));
+$('#mode-tue').addEventListener('click',()=>setMode('tue'));
+function togglePause(){ state.paused=!state.paused; $('#pause-l').textContent = state.paused?'Resume':'Pause'; $('#pause').setAttribute('aria-pressed',state.paused); }
+$('#pause').addEventListener('click',togglePause);
+document.addEventListener('keydown', e=>{
+  if (e.target.closest('input,textarea')) return;
+  if (e.code==='Space' && !e.target.closest('button')){ e.preventDefault(); togglePause(); }
+  if (e.key==='j' || e.key==='k'){
+    const rows=[...document.querySelectorAll('.row:not(.done)')]; if(!rows.length) return;
+    const i=rows.findIndex(r=>r.dataset.id===state.sel);
+    const n=rows[Math.min(rows.length-1, Math.max(0, i+(e.key==='j'?1:-1)))];
+    state.sel=n.dataset.id; state.confirm=null; renderLanes(); renderHand();
+    document.querySelector(`.row[data-id="${state.sel}"]`)?.scrollIntoView({block:'nearest'});
+  }
+  if (e.key==='u'){ document.querySelector('[data-act="up"]')?.click(); }
+});
+
+setMode('surge');
+setInterval(tick, 1000);
+})();
+</script>
