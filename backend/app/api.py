@@ -1,16 +1,28 @@
-"""Read endpoints for the supervisor board (the frontend comes later)."""
+"""Read endpoints for the supervisor board (frontend/, a Next.js app)."""
 
 from fastapi import APIRouter, HTTPException, Response
 
 from . import db
+from .supervisor import config as C
 
 router = APIRouter(prefix="/api")
 
+# A call is on the line until it has ended. Live calls get ended_at from Retell's call_ended webhook;
+# simulated calls are inserted with their scripted end time, so they count until then too.
+ON_LINE = "(status = 'ongoing' OR ended_at > now())"
+
 # Everything on calls except the audio bytes and the raw webhook payload.
-CALL_COLUMNS = """call_id, source, scenario, status, from_number, started_at, ended_at, duration_ms,
+CALL_COLUMNS = f"""call_id, source, scenario, status, from_number, started_at, ended_at, duration_ms,
   disconnection_reason, lane, red_flags, cluster, intent, reason, urgency, caller_name, callback_number,
   callback_source, needs_review, rules_result, jev_result, details, red_flag_at, transfer_started_at,
-  transfer_ended_at, transfer_target, transfer_status, summary, recording_url, recording IS NOT NULL AS has_recording"""
+  transfer_ended_at, transfer_target, transfer_status, summary, recording_url, recording IS NOT NULL AS has_recording,
+  {ON_LINE} AS on_line"""
+
+# The slim columns a board row needs. The board is polled every few seconds, so it skips
+# transcripts, details and full classifier results (those are on GET /api/calls/{id}).
+ROW_COLUMNS = f"""call_id, source, status, started_at, lane, red_flags, cluster, intent, reason, caller_name,
+  callback_number, from_number, transfer_status, disconnection_reason, needs_review,
+  rules_result ->> 'lane' AS rules_lane, jev_result ->> 'lane' AS jev_lane, {ON_LINE} AS on_line"""
 
 # Who in 'A person soon' gets called back first (decision 3), most urgent first.
 AMBER_ORDER = ["child_under_2", "confused_or_unclear", "mental_health", "hospice", "recent_discharge",
@@ -27,20 +39,80 @@ async def board(minutes: int = 180):
             GROUP BY cluster ORDER BY calls DESC"""
     )
     amber = await db.fetch(
-        f"""SELECT {CALL_COLUMNS}, extract(epoch FROM now() - started_at)::int / 60 AS waiting_min
+        f"""SELECT {ROW_COLUMNS}, extract(epoch FROM now() - started_at)::int / 60 AS waiting_min
             FROM calls WHERE lane = 'amber' AND started_at > {since}
             ORDER BY coalesce(array_position(%s::text[], reason), 99), urgency DESC NULLS LAST, started_at""",
         AMBER_ORDER,
     )
-    red = await db.fetch(f"SELECT {CALL_COLUMNS} FROM calls WHERE lane = 'red' AND started_at > {since} ORDER BY started_at DESC")
+    red = await db.fetch(f"SELECT {ROW_COLUMNS} FROM calls WHERE lane = 'red' AND started_at > {since} ORDER BY started_at DESC")
+    green = await db.fetch(f"SELECT {ROW_COLUMNS} FROM calls WHERE lane = 'green' AND started_at > {since} ORDER BY started_at DESC LIMIT 100")
+    # Live calls the classifiers haven't placed yet (no caller turn so far).
+    unsorted = await db.fetch(f"SELECT {ROW_COLUMNS} FROM calls WHERE lane IS NULL AND status = 'ongoing' AND started_at > {since} ORDER BY started_at DESC")
     return {
         "lanes": {r["lane"]: r["n"] for r in lanes},
         "clusters": clusters,
+        "cluster_series": await cluster_series(since),
         "red": red,
         "amber_queue": amber,
+        "green": green,
+        "unsorted": unsorted,
+        "volume_1min": await volume_1min(),
+        "kpis": await kpis(since),
         "surge": await db.fetchrow("SELECT * FROM surge_state WHERE id = 1"),
         "open_suggestions": (await db.fetchrow("SELECT count(*) AS n FROM suggestions WHERE status = 'open'"))["n"],
     }
+
+
+async def kpis(since: str) -> dict:
+    k = await db.fetchrow(
+        f"""SELECT count(*) AS total,
+                   count(*) FILTER (WHERE started_at > now() - interval '10 minutes') AS calls_10min,
+                   count(*) FILTER (WHERE {ON_LINE}) AS on_line,
+                   count(*) FILTER (WHERE disconnection_reason = 'user_hangup') AS hung_up,
+                   count(*) FILTER (WHERE lane = 'green') AS handled_by_ai,
+                   count(*) FILTER (WHERE lane IS NOT NULL) AS sorted,
+                   round((percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM transfer_started_at - red_flag_at))
+                         FILTER (WHERE lane = 'red' AND transfer_started_at IS NOT NULL AND red_flag_at IS NOT NULL))::numeric, 1)
+                     AS red_median_handoff_s,
+                   count(*) FILTER (WHERE lane = 'amber' AND started_at > now() - make_interval(mins => %s)) AS amber_waiting,
+                   round(extract(epoch FROM now() - min(started_at) FILTER (
+                     WHERE lane = 'amber' AND started_at > now() - make_interval(mins => %s))) / 60) AS oldest_amber_min
+            FROM calls WHERE started_at > {since}""",
+        C.AMBER_LOOKBACK_MIN, C.AMBER_LOOKBACK_MIN,
+    )
+    k["red_not_connected"] = (await db.fetchrow(
+        "SELECT count(*) AS n FROM suggestions WHERE type = 'red_not_connected' AND status = 'open'"))["n"]
+    k["amber_target_min"] = C.AMBER_TARGET_MIN
+    k["ai_handled_share"] = round(k["handled_by_ai"] / k["sorted"], 2) if k["sorted"] else None
+    return k
+
+
+async def volume_1min(minutes: int = 20) -> list[dict]:
+    """Calls per minute by lane over the last `minutes`, empty minutes included."""
+    return await db.fetch(
+        """SELECT m.bucket, count(c.call_id) AS calls,
+                  count(*) FILTER (WHERE c.lane = 'red') AS red, count(*) FILTER (WHERE c.lane = 'amber') AS amber,
+                  count(*) FILTER (WHERE c.lane = 'green') AS green
+           FROM generate_series(date_trunc('minute', now()) - make_interval(mins => %s), date_trunc('minute', now()), interval '1 minute') m(bucket)
+           LEFT JOIN calls c ON date_trunc('minute', c.started_at) = m.bucket
+           GROUP BY 1 ORDER BY 1""",
+        minutes - 1,
+    )
+
+
+async def cluster_series(since: str, minutes: int = 10) -> dict[str, list[int]]:
+    """Per cluster, calls per minute over the last `minutes` (the sparklines on the Watch card)."""
+    rows = await db.fetch(
+        f"""SELECT s.cluster, array_agg(s.n ORDER BY s.bucket) AS series FROM (
+              SELECT cl.cluster, m.bucket, count(c.call_id) AS n
+              FROM (SELECT DISTINCT cluster FROM calls WHERE started_at > {since} AND cluster IS NOT NULL) cl
+              CROSS JOIN generate_series(date_trunc('minute', now()) - make_interval(mins => %s), date_trunc('minute', now()), interval '1 minute') m(bucket)
+              LEFT JOIN calls c ON c.cluster = cl.cluster AND date_trunc('minute', c.started_at) = m.bucket
+              GROUP BY 1, 2) s
+            GROUP BY 1""",
+        minutes - 1,
+    )
+    return {r["cluster"]: r["series"] for r in rows}
 
 
 @router.get("/calls")

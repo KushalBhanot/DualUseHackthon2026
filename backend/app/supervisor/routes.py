@@ -1,7 +1,10 @@
-"""Supervisor actions: decide suggestions, switch surge mode, set the status message, edit nurse lines.
+"""Supervisor actions: decide suggestions, switch surge mode, set the status message, edit nurse lines,
+change a call's lane.
 
 Every action is one click and is logged as an event with actor='supervisor'.
 """
+
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -186,3 +189,27 @@ async def update_nurse_line(line_id: int, body: NurseLine):
         raise HTTPException(404, "no such nurse line")
     await act("nurse_line_changed", {"id": line_id} | changes)
     return row
+
+
+# ---------------------------------------------------------------- lanes
+
+class LaneChange(BaseModel):
+    lane: Literal["green", "amber", "red"]
+    reason: str
+
+
+@router.post("/calls/{call_id}/lane")
+async def set_lane(call_id: str, body: LaneChange):
+    """The one place a lane can go down. The AI only ever raises lanes (db.raise_lane)."""
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(422, "say why the lane is changing")
+    row = await db.fetchrow(
+        """UPDATE calls c SET lane = %s FROM (SELECT lane AS old FROM calls WHERE call_id = %s) prev
+           WHERE c.call_id = %s RETURNING prev.old""",
+        body.lane, call_id, call_id,
+    )
+    if not row:
+        raise HTTPException(404, "no such call")
+    await act("lane_set", {"from": row["old"], "to": body.lane, "reason": reason}, call_id)
+    return {"call_id": call_id, "lane": body.lane}

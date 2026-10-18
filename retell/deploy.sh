@@ -24,6 +24,17 @@ export LLM_ID="${LLM_ID:-}" AGENT_ID="${AGENT_ID:-}"
 json_field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[process.argv[1]]))' "$1"; }
 quiet_unless_dry() { if [[ ${#DRY[@]} -gt 0 ]]; then cat; else cat >/dev/null; fi; }
 
+# A published version (and its LLM) is locked, and publishing doesn't open a new draft.
+# So after connect.sh publishes, start a new draft from the latest version before updating.
+if [[ -n "$AGENT_ID" && ${#DRY[@]} -eq 0 ]]; then
+  latest=$(retell get-agent "$AGENT_ID")
+  if [[ "$(echo "$latest" | json_field is_published)" == true ]]; then
+    base=$(echo "$latest" | json_field version)
+    retell create-agent-version "$AGENT_ID" --base-version "$base" >/dev/null
+    echo "agent version $base is published; started a new draft from it"
+  fi
+fi
+
 if [[ -z "$LLM_ID" ]]; then
   node ladder.mjs
   out=$(retell create-retell-llm --body build/llm.json "${DRY[@]}")

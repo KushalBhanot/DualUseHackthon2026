@@ -33,3 +33,61 @@ def test_board_calls_and_analytics():
         assert a["handoff"]["share_told_to_call_911"] == 0.5
         assert float(a["handoff"]["mean_sec_flag_to_transfer"]) == 4.5
         assert a["details"]["confirmation_rate"] == 0.5
+
+        assert {"kpis", "volume_1min", "green", "unsorted", "cluster_series"} <= b.keys()
+        assert b["kpis"]["total"] == 5 and b["kpis"]["red_median_handoff_s"] == 4.5
+        assert b["kpis"]["ai_handled_share"] == 0.2
+        assert len(b["volume_1min"]) == 20 and b["volume_1min"][-1]["calls"] == 5
+        assert b["cluster_series"]["injury_or_illness"][-1] == 2
+        assert [c["call_id"] for c in b["green"]] == ["g1"]
+        assert "details" not in b["red"][0]  # board rows stay slim
+
+
+def test_supervisor_lowers_a_lane():
+    async def setup():
+        await db.execute("TRUNCATE calls, suggestions, events CASCADE")
+        await db.execute("INSERT INTO calls (call_id, lane) VALUES ('c1', 'amber')")
+    with TestClient(app) as client:
+        client.portal.call(setup)
+        assert client.post("/api/calls/c1/lane", json={"lane": "green", "reason": " "}).status_code == 422
+        assert client.post("/api/calls/nope/lane", json={"lane": "green", "reason": "x"}).status_code == 404
+        r = client.post("/api/calls/c1/lane", json={"lane": "green", "reason": "Spoke to caller, routine refill"})
+        assert r.json() == {"call_id": "c1", "lane": "green"}
+        card = client.get("/api/calls/c1").json()
+        assert card["lane"] == "green"
+        assert card["events"][-1]["actor"] == "supervisor" and card["events"][-1]["payload"]["from"] == "amber"
+
+
+def test_sim_instant_and_reset():
+    import time
+
+    with TestClient(app) as client:
+        client.portal.call(lambda: db.execute("TRUNCATE calls, suggestions, events CASCADE"))
+        assert client.post("/api/sim/start", json={"scenario": "nope"}).status_code == 422
+        s = client.post("/api/sim/start", json={"scenario": "tuesday", "count": 5, "mode": "instant", "seed": 1}).json()
+        assert s["running"] and s["total"] == 5
+        for _ in range(100):
+            if not client.get("/api/sim").json()["running"]:
+                break
+            time.sleep(0.05)
+        assert client.get("/api/sim").json()["inserted"] == 5
+        assert len(client.get("/api/calls?source=simulated").json()) == 5
+        assert client.post("/api/sim/reset").json()["scenario"] is None
+        assert client.get("/api/calls?source=simulated").json() == []
+
+
+def test_on_the_line_counts_unfinished_simulated_calls():
+    async def setup():
+        await db.execute("TRUNCATE calls, suggestions, events CASCADE")
+        await db.execute(
+            """INSERT INTO calls (call_id, source, status, lane, ended_at) VALUES
+               ('live', 'retell', 'ongoing', 'green', NULL),
+               ('sim_now', 'simulated', 'analyzed', 'amber', now() + interval '90 s'),
+               ('sim_done', 'simulated', 'analyzed', 'green', now() - interval '5 s')""")
+    with TestClient(app) as client:
+        client.portal.call(setup)
+        b = client.get("/api/board").json()
+        assert b["kpis"]["on_line"] == 2
+        rows = {c["call_id"]: c["on_line"] for c in b["green"] + b["amber_queue"]}
+        assert rows == {"live": True, "sim_now": True, "sim_done": False}
+        assert client.get("/api/calls/sim_done").json()["on_line"] is False

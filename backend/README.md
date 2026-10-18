@@ -2,7 +2,7 @@
 
 FastAPI + Postgres. Stores every Retell call (live transcript, details, transfer outcome, summary, audio),
 classifies calls with rules + Jev, steers the agent on red flags, and suggests supervisor decisions.
-Design: [../backend_plan.md](../backend_plan.md).
+Design: [../backend_plan.md](../backend_plan.md). The supervisor board is the Next.js app in [../frontend](../frontend).
 
 ## Run it
 
@@ -19,7 +19,11 @@ uv sync
 uv run uvicorn app.main:app --port 8000      # schema is applied on startup
 ```
 
+Then start the board: `cd ../frontend && npm install && npm run dev` and open http://localhost:3000.
+
 ## Simulated emergencies (no Retell needed)
+
+From the board: **Demo controls** starts a scenario live (one call every 1.5 s) or loads it instantly, pauses it, and resets the board. From the command line:
 
 ```bash
 uv run python -m app.seed serious_earthquake --count 40 --classify --reset   # a surge, instantly
@@ -48,13 +52,15 @@ It opens a public tunnel to port 8000. Then it redeploys and publishes the agent
 
 | | |
 |---|---|
-| `GET /api/board` | lanes, clusters, red calls, ranked "person soon" queue, surge state |
+| `GET /api/board` | lanes, clusters, red / ranked "person soon" / green calls, KPIs, calls per minute, surge state |
 | `GET /api/calls`, `GET /api/calls/{id}` | call list; one call with details, transcript, events, alerts (Handoff Card) |
 | `GET /api/calls/{id}/recording` | audio |
 | `GET /api/analytics?minutes=60` | volume, lane mix, rules vs Jev, details, handoff timing |
 | `GET /api/suggestions` · `POST /api/suggestions/{id}/accept\|snooze\|dismiss\|resolve` | supervisor decisions |
 | `GET/POST /api/surge`, `GET /api/status-messages`, `POST /api/status-message` | surge mode and the status message |
 | `GET/POST /api/nurse-lines`, `PATCH /api/nurse-lines/{id}` | nurse lines for red transfers |
+| `POST /api/calls/{id}/lane` | supervisor sets a lane, with a reason (the only way a lane goes down) |
+| `GET /api/sim`, `POST /api/sim/start\|stop\|reset` | demo controls: run a simulated scenario from the board |
 | `POST /retell/webhook`, `/retell/inbound`, `/retell/tools/capture_detail`, `/retell/tools/confirm_detail` | called by Retell (signature-checked) |
 
 Interactive docs: http://localhost:8000/docs
@@ -76,8 +82,9 @@ app/
   inbound.py    per-call variables: status message, callback windows, nurse line
   recordings.py audio download
   api.py        read endpoints
-  seed.py       simulated emergencies
+  seed.py       simulated emergencies (CLI)
+  sim.py        the same, started from the board's demo controls
   classify/     labels.py  rules.py  jev.py  combine.py  service.py
   details/      directory.json  extract.py  readback.py  confirm.py  tools.py
-  supervisor/   config.py (thresholds)  messages.py (approved wording)  engine.py (15 s check)  routes.py
+  supervisor/   config.py (thresholds)  messages.py (approved wording)  engine.py (15 s check)  routes.py (actions, lane changes)
 ```

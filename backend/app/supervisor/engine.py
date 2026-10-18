@@ -14,6 +14,7 @@ from . import config as C
 from . import messages
 
 log = logging.getLogger(__name__)
+_tick_lock = asyncio.Lock()  # the 15 s loop and the demo simulator both tick; one at a time
 
 
 async def metrics() -> dict:
@@ -89,6 +90,11 @@ async def upsert(type_: str, wanted: bool, evidence: dict, recommendation: dict,
 
 
 async def tick() -> None:
+    async with _tick_lock:
+        await _tick()
+
+
+async def _tick() -> None:
     m = await metrics()
     surge_on, active_message = m["surge"]["surge_on"], m["surge"]["status_message"]
 
