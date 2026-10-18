@@ -222,7 +222,7 @@ const transfer_to_nurse = {
   type: "transfer_call",
   name: "transfer_to_nurse",
   description: "Warm-transfer the caller to the on-duty nurse or house supervisor. Use immediately in handoff_now.",
-  transfer_destination: { type: "predefined", number: NURSE_LINE },
+  transfer_destination: { type: "predefined", number: "{{nurse_line}}" },
   transfer_option: {
     type: "warm_transfer",
     transfer_ring_duration_ms: 20000,
@@ -245,11 +245,12 @@ const llm = {
   tool_call_strict_mode: true,
   start_speaker: "agent",
   begin_message:
-    "{{hospital_name}}. I'm an automated assistant, not a person, and you can ask for a person at any time. " +
+    "{{hospital_name}}. I'm an automated assistant, not a person, and you can ask for a person at any time. {{surge_banner}} " +
     "First, a quick safety check: is anyone with you having chest pain, trouble breathing, or bleeding that won't stop?",
   general_prompt,
   general_tools: [],
-  default_dynamic_variables: approved,
+  // surge_banner and nurse_line are replaced per call by the backend's inbound webhook (backend/app/webhooks.py).
+  default_dynamic_variables: { ...approved, surge_banner: "", nurse_line: NURSE_LINE },
   starting_state: "ask",
   states: [
     { name: "ask", state_prompt: ask_prompt, edges: [toHandoff, toPersonSoon, toCallback, toInfo], tools: [] },
