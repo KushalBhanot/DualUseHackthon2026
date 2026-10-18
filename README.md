@@ -4,6 +4,8 @@
 
 InnovateLA × Dual-Use Hackathon 2026 · Communication track (Retell AI) · "On the Line"
 
+**Try it live: https://night-ledger-neon.onrender.com** (free hosting: the first load after idle takes about a minute). Open **Demo controls** in the sidebar and start a scenario.
+
 When an earthquake, fire or outage hits at night, a hospital's phone line floods. Most callers want to know if the ER is open; a few are in real danger. A two-person night crew can't tell them apart until someone picks up. Night Ledger answers every call with a Retell voice agent, runs the same red-flag screen on every caller, sorts each one into a lane, and gives the overnight house supervisor one board where the only decisions left are the ones that need a person.
 
 ## The ladder
