@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: night-ledger
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DEMO_SEED
+        value: serious_earthquake
+      - key: DATABASE_PATH
+        value: /app/night_ledger.db

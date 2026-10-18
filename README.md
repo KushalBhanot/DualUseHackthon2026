@@ -41,6 +41,12 @@ Open http://localhost:8000, go to **Demo controls** and start **Serious earthqua
 
 Tests: `uv run --group dev pytest`
 
+### Deploy
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/KushalBhanot/DualUseHackthon2026)
+
+`render.yaml` builds `backend/Dockerfile` on Render's free plan. A fresh instance starts with a seeded earthquake surge (`DEMO_SEED`), so visitors land on a live board. The free plan sleeps after 15 idle minutes and takes about a minute to wake, and the SQLite data resets on each restart. The same Dockerfile runs on Fly.io, Railway or any container host.
+
 ### Live phone calls (optional)
 
 1. Expose the backend: `cloudflared tunnel --url http://localhost:8000`

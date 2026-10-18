@@ -28,6 +28,10 @@ async def _engine_loop():
 async def lifespan(app):
     db.conn()
     sim.seed_nurse_lines()
+    # Public demo: a fresh instance starts with a recent surge night already on the board.
+    demo = os.environ.get("DEMO_SEED")
+    if demo and not db.one("SELECT call_id FROM calls LIMIT 1"):
+        sim.backfill(demo, int(os.environ.get("DEMO_SEED_COUNT", "45")), minutes=12)
     task = asyncio.create_task(_engine_loop())
     yield
     task.cancel()
