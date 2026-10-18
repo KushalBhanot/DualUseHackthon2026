@@ -4,12 +4,24 @@
 // Each rung is a Retell LLM *state*. Edges only point up the ladder, so the
 // "one-way trigger" rule is structural: the AI has no edge that lowers a lane.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-const NURSE_LINE = process.env.NURSE_LINE || "+12139940320"; // E.164; your phone for demos
-const VOICE_ID = process.env.VOICE_ID || "11labs-Adrian";
+const NURSE_LINE = process.env.NURSE_LINE || "+12139940320"; // E.164; default only, the backend's inbound webhook picks the live line
 const LLM_ID = process.env.LLM_ID || "__LLM_ID__";
 const WEBHOOK_URL = process.env.WEBHOOK_URL || null;
+// Base URL of the backend's tool endpoints, e.g. https://<tunnel>/retell/tools. Without it the
+// capture/confirm tools are left out and the agent reads details back itself, as before.
+const TOOLS_URL = process.env.TOOLS_URL || null;
+// Speech-to-speech: set S2S_MODEL (e.g. gpt-realtime-2.1). Retell allows s2s_model or model, not both.
+const S2S_MODEL = process.env.S2S_MODEL || null;
+// S2S models speak with their own voices: only Retell's OpenAI presets are allowed (`retell list-voices`).
+const VOICE_ID = process.env.VOICE_ID || (S2S_MODEL ? "openai-Adrian" : "11labs-Adrian");
+
+// Names the speech-to-text should listen for. Shared with the backend's matcher.
+const directory = JSON.parse(readFileSync(new URL("../backend/app/details/directory.json", import.meta.url), "utf8"));
+const DIRECTORY_KEYWORDS = ["insurer", "doctor", "hospital"].flatMap((kind) =>
+  Object.keys(directory[kind]).map((name) => name.replace(/^Dr\. /, "")),
+);
 
 // Supervisor-approved wording. Changing these is the "approve before it goes live" step:
 // edit, rebuild, `retell update-retell-llm`. The agent may not add facts beyond them.
@@ -60,7 +72,7 @@ Never add, guess or stretch facts about the incident, wait times, or the hospita
 6. If you can't understand the caller after one clarifying question, or they sound confused, disoriented or impaired, move them to person_soon.
 7. If the caller asks for a person, human, nurse or operator, honor it: move to person_soon (or handoff_now if any red flag).
 8. When more than one route applies, the more urgent wins: handoff_now > person_soon > callback_routine > info_status.
-
+${TOOLS_URL ? `9. DETAILS COME FROM THE TRANSCRIPT. When you collect a name, phone number, date of birth, insurance, doctor, hospital or medication: ask for it (ask the caller to spell names letter by letter), then call capture_detail. Read back only the read_back text it returns, word for word, and ask "Is that right?" Then call confirm_detail with the caller's answer. If it tells you to ask again, do so. Never read back a detail from memory. Never do this in handoff_now.\n` : ""}
 ## How you speak
 Calm, warm, plain. One or two short sentences per turn. One question at a time. No lists, no jargon, no filler sympathy. If the caller speaks another language, answer in that language if you can.
 `.trim();
@@ -101,7 +113,7 @@ const callback_prompt = `
 ## Step 3: Hold, can wait
 Say: "That's not something we can handle tonight, but I can book a callback for {{routine_callback_window}}."
 Collect one at a time: their name; the best callback number (if {{user_number}} looks like a phone number, ask "Is the number you're calling from the best one?"); and one sentence on what they need.
-Read back the name, number and window. Call send_callback_confirmation, then say "If anything gets worse before then, call 911," and call end_call.
+${TOOLS_URL ? "Capture and confirm the name and number with capture_detail and confirm_detail (rule 9). Then read back the window." : "Read back the name, number and window."} Call send_callback_confirmation, then say "If anything gets worse before then, call 911," and call end_call.
 
 Keep listening for vulnerability. Go to person_soon if: the caller or the patient is 75 or older or frail; discharged in the last 2 weeks; pregnant; a child under 2 is involved; they live alone and are struggling; they say they already called tonight and no one called back; or their worry is rising.
 Any red flag: handoff_now.
@@ -112,7 +124,7 @@ const person_soon_prompt = `
 Tell them a staff member, such as a nurse, supervisor or social worker, will call them back {{priority_callback_window}}. You only collect details. You do not solve the problem.
 
 Collect one at a time, skipping what you already know:
-1. FIRST, their name and best callback number. Read the number back. This matters most.
+1. FIRST, their name and best callback number. ${TOOLS_URL ? "Capture and confirm both with capture_detail and confirm_detail (rule 9)." : "Read the number back."} This matters most.
 2. Then, by reason:
    - Family locating: the person's full name, approximate age, what they look like or were wearing, and where they were last. If pressed, repeat: "I can't share patient information, but staff will call you back."
    - Child under 2: the child's age and main symptom. Ask: "Is the baby breathing hard, hard to wake, or turning blue or gray?" If yes: handoff_now.
@@ -237,26 +249,68 @@ const transfer_to_nurse = {
   speak_during_execution: false,
 };
 
+// Detail capture: the backend pulls the value from the speech-to-text transcript and returns
+// the exact text to read back, so the speech model never decides what gets written down.
+const DETAIL_FIELDS = [
+  "callback_number", "caller_name", "patient_name", "missing_person_name", "date_of_birth",
+  "insurance_provider", "doctor_name", "hospital_name", "medication_name",
+];
+
+const detailTool = (name, description, properties, required) => ({
+  type: "custom",
+  name,
+  description,
+  url: `${TOOLS_URL}/${name}`,
+  method: "POST",
+  parameters: { type: "object", properties, required },
+  speak_during_execution: false,
+  speak_after_execution: true,
+  timeout_ms: 3000,
+});
+
+const capture_detail = detailTool(
+  "capture_detail",
+  "Call right after the caller gives a detail. Returns read_back: the exact words to read back to the caller.",
+  {
+    field: { type: "string", enum: DETAIL_FIELDS, description: "Which detail the caller just gave." },
+    model_heard: { type: "string", description: "What you heard, as text. Used only for comparison." },
+  },
+  ["field", "model_heard"],
+);
+
+const confirm_detail = detailTool(
+  "confirm_detail",
+  "Call after reading back a detail, with whether the caller said it was right.",
+  {
+    field: { type: "string", enum: DETAIL_FIELDS },
+    confirmed: { type: "boolean", description: "True only if the caller clearly said the read-back was right." },
+  },
+  ["field", "confirmed"],
+);
+
+const detailTools = TOOLS_URL ? [capture_detail, confirm_detail] : [];
+
 // ---------------------------------------------------------------- Retell LLM
 
 const llm = {
-  model: process.env.LLM_MODEL || "gpt-5.6-terra",
+  ...(S2S_MODEL ? { s2s_model: S2S_MODEL } : { model: process.env.LLM_MODEL || "gpt-5.6-terra" }),
   model_temperature: 0,
   tool_call_strict_mode: true,
   start_speaker: "agent",
+  // {{surge_banner}} is the supervisor-approved status message, set per call by the backend's
+  // inbound webhook while surge mode is on; empty otherwise.
   begin_message:
     "{{hospital_name}}. I'm an automated assistant, not a person, and you can ask for a person at any time. {{surge_banner}} " +
     "First, a quick safety check: is anyone with you having chest pain, trouble breathing, or bleeding that won't stop?",
   general_prompt,
   general_tools: [],
-  // surge_banner and nurse_line are replaced per call by the backend's inbound webhook (backend/app/webhooks.py).
   default_dynamic_variables: { ...approved, surge_banner: "", nurse_line: NURSE_LINE },
   starting_state: "ask",
   states: [
     { name: "ask", state_prompt: ask_prompt, edges: [toHandoff, toPersonSoon, toCallback, toInfo], tools: [] },
     { name: "info_status", state_prompt: info_prompt, edges: [toHandoff, toPersonSoon, toCallback], tools: [send_status_link, send_volunteer_link, end_call] },
-    { name: "callback_routine", state_prompt: callback_prompt, edges: [toHandoff, toPersonSoon], tools: [send_callback_confirmation, end_call] },
-    { name: "person_soon", state_prompt: person_soon_prompt, edges: [toHandoff], tools: [end_call] },
+    { name: "callback_routine", state_prompt: callback_prompt, edges: [toHandoff, toPersonSoon], tools: [...detailTools, send_callback_confirmation, end_call] },
+    { name: "person_soon", state_prompt: person_soon_prompt, edges: [toHandoff], tools: [...detailTools, end_call] },
     { name: "handoff_now", state_prompt: handoff_prompt, edges: [], tools: [transfer_to_nurse, end_call] },
   ],
 };
@@ -272,7 +326,6 @@ const post_call_analysis_data = [
   { type: "enum", name: "cluster", description: "Topic for grouping similar calls on the supervisor board.", choices: ["outage", "family", "help", "media", "scheduling", "billing", "medication", "mental_health", "child", "injury_or_illness", "other"], required: true },
   { type: "string", name: "intent", description: "One short sentence: why they called, in plain words.", examples: ["Asking if the ER is open with the power out", "Looking for brother after the building collapse"], required: true },
   { type: "string", name: "escalation_reason", description: "Why the call was moved above step 2, or 'none'.", required: true },
-  { type: "enum", name: "language", description: "Main language the caller spoke.", choices: ["en", "es", "ko", "hy", "zh", "vi", "tl", "other"] },
   { type: "string", name: "caller_name", description: "Caller's name if given, else 'unknown'." },
   { type: "string", name: "callback_number", description: "Callback number confirmed by the caller, else 'unknown'." },
   { type: "string", name: "callback_window", description: "Callback window promised to the caller, or 'none'." },
@@ -292,7 +345,7 @@ const agent = {
   reminder_max_count: 2,
   end_call_after_silence_ms: 60000,
   max_call_duration_ms: 900000,
-  boosted_keywords: ["chest", "breathing", "bleeding", "seizure", "stroke", "overdose", "unconscious", "fainted", "Harbor General", "MyChart"],
+  boosted_keywords: ["chest", "breathing", "bleeding", "seizure", "stroke", "overdose", "unconscious", "fainted", "MyChart", ...DIRECTORY_KEYWORDS],
   post_call_analysis_data,
   ...(WEBHOOK_URL && { webhook_url: WEBHOOK_URL }),
 };
@@ -300,4 +353,4 @@ const agent = {
 mkdirSync(new URL("./build/", import.meta.url), { recursive: true });
 writeFileSync(new URL("./build/llm.json", import.meta.url), JSON.stringify(llm, null, 2));
 writeFileSync(new URL("./build/agent.json", import.meta.url), JSON.stringify(agent, null, 2));
-console.error(`wrote build/llm.json and build/agent.json (llm_id=${LLM_ID}, nurse_line=${NURSE_LINE})`);
+console.error(`wrote build/llm.json and build/agent.json (llm_id=${LLM_ID}, default nurse_line=${NURSE_LINE}, ${S2S_MODEL ? `s2s_model=${S2S_MODEL}` : "text model"}, detail tools ${TOOLS_URL ? "on" : "off"})`);

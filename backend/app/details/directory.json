@@ -1,0 +1,44 @@
+{
+  "_note": "Demo lists for matching spoken names. Doctor names are fictional. Used by app/details/extract.py and by retell/ladder.mjs (boosted_keywords).",
+  "insurer": {
+    "Blue Cross Blue Shield": ["blue cross", "blue shield", "bcbs", "anthem"],
+    "Kaiser Permanente": ["kaiser"],
+    "Aetna": [],
+    "Cigna": [],
+    "UnitedHealthcare": ["united healthcare", "united health", "uhc", "united"],
+    "Humana": [],
+    "Medicare": [],
+    "Medi-Cal": ["medi cal", "medicaid"],
+    "Health Net": ["healthnet"],
+    "Molina Healthcare": ["molina"]
+  },
+  "doctor": {
+    "Dr. Okafor": ["okafor"],
+    "Dr. Lindqvist": ["lindqvist", "lindquist"],
+    "Dr. Ramirez": ["ramirez"],
+    "Dr. Nguyen": ["nguyen"],
+    "Dr. Patel": ["patel"],
+    "Dr. Haddad": ["haddad"],
+    "Dr. Kowalski": ["kowalski"],
+    "Dr. Mensah": ["mensah"]
+  },
+  "hospital": {
+    "Harbor General Hospital": ["harbor general", "harbor"],
+    "St. Brigid Medical Center": ["st brigid", "saint brigid", "brigid"],
+    "Bayview Children's Hospital": ["bayview", "bayview childrens", "children's hospital"],
+    "Eastside Urgent Care": ["eastside", "east side urgent care"],
+    "Mission Valley Clinic": ["mission valley"]
+  },
+  "medication": {
+    "lisinopril": [],
+    "metformin": [],
+    "atorvastatin": [],
+    "warfarin": ["coumadin"],
+    "apixaban": ["eliquis"],
+    "insulin": [],
+    "albuterol": ["inhaler"],
+    "levothyroxine": ["synthroid"],
+    "amlodipine": [],
+    "sertraline": ["zoloft"]
+  }
+}

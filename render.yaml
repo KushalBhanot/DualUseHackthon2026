@@ -11,5 +11,5 @@ services:
     envVars:
       - key: DEMO_SEED
         value: serious_earthquake
-      - key: DATABASE_PATH
-        value: /app/night_ledger.db
+      - key: VERIFY_RETELL_SIGNATURE
+        value: "1"

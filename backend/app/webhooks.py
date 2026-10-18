@@ -1,150 +1,95 @@
-"""Endpoints Retell calls: call lifecycle webhooks and the inbound webhook that sets per-call variables."""
-import os
-import time
+"""Retell call webhooks: call_started, call_ended, call_analyzed.
 
-from fastapi import APIRouter, Request
+We answer fast (204) and do the slow parts (classification, audio download) in the background.
+"""
 
-from . import db
-from .classify import jev, rules
-from .classify.combine import combine
+import datetime as dt
 
-router = APIRouter(prefix="/retell")
+from fastapi import APIRouter, BackgroundTasks, Request, Response
 
-STATE_LANE = {"handoff_now": "red", "person_soon": "amber", "info_status": "green", "callback_routine": "green"}
+from . import db, handoff, monitor, recordings
+from .classify.service import classify_and_store
+from .details.tools import same_value
+from .retell_auth import retell_body
 
-
-def _caller_text(transcript):
-    return " ".join(t.get("content", "") for t in transcript if t.get("role") == "user")
+router = APIRouter()
 
 
-def _transcript(call):
-    items = call.get("transcript_object") or []
-    return [{"role": i.get("role"), "content": i.get("content", "")} for i in items if i.get("role") in ("user", "agent")]
+def ts(ms) -> dt.datetime | None:
+    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc) if ms else None
 
 
-def _transfer_outcome(call, red):
-    """Work out what happened to a red caller's transfer from Retell's call object."""
-    reason = call.get("disconnection_reason") or ""
-    tool_items = call.get("transcript_with_tool_calls") or []
-    tried = any(i.get("role") == "tool_call_invocation" and i.get("name") == "transfer_to_nurse" for i in tool_items)
-    if reason == "call_transfer":
-        return "connected"
-    if tried and reason in ("user_hangup",):
-        return "caller_hung_up"
-    if tried:
-        return "no_answer"
-    return "never_started" if red else None
-
-
-def _classify_and_store(call_id, transcript, retell_lane=None):
-    stored = db.one("SELECT lane FROM calls WHERE call_id=?", (call_id,))
-    text = _caller_text(transcript)
-    r = rules.classify(text)
-    model = jev.classify("\n".join(f"{t['role']}: {t['content']}" for t in transcript))
-    comb = combine(r, model, retell_lane, stored["lane"] if stored else None)
-    fields = {"rules_result": r, "needs_review": int(comb["needs_review"]), "reason": r["reason"]}
-    if model:
-        fields["jev_result"] = model
-    if r["red_flags"]:
-        fields["red_flags"] = r["red_flags"]
-    if r["cluster"] and r["cluster"] != "other":
-        fields["cluster"] = r["cluster"]
-    if r.get("place"):
-        fields["neighborhood"] = r["place"]
-    db.update("calls", "call_id", call_id, fields)
-    if comb["rules_miss"]:
-        db.event("rules_miss", call_id, "system", {"model": model})
-    db.raise_lane(call_id, comb["lane"], "classifier")
-    return comb
-
-
-@router.post("/webhook")
-async def webhook(request: Request):
-    body = await request.json()
+@router.post("/retell/webhook", status_code=204)
+async def webhook(request: Request, background: BackgroundTasks):
+    body = await retell_body(request)
     event, call = body.get("event"), body.get("call") or {}
     call_id = call.get("call_id")
     if not call_id:
-        return {"ok": False}
-    now = time.time()
-    db.event(f"retell_{event}", call_id, "system", {"disconnection_reason": call.get("disconnection_reason")})
-    existing = db.one("SELECT call_id FROM calls WHERE call_id=?", (call_id,))
-    if not existing:
-        db.insert("calls", {"call_id": call_id, "source": "retell", "status": "live", "from_number": call.get("from_number"),
-                            "started_at": (call.get("start_timestamp") or now * 1000) / 1000, "raw": call})
+        return Response(status_code=204)
 
-    if event == "call_ended":
-        transcript = _transcript(call)
-        comb = _classify_and_store(call_id, transcript)
-        # Lane from the agent's own state moves (node transitions), up only
-        for item in call.get("transcript_with_tool_calls") or []:
-            if item.get("role") == "node_transition" and item.get("new_node_name") in STATE_LANE:
-                db.raise_lane(call_id, STATE_LANE[item["new_node_name"]], "agent_state")
-        row = db.one("SELECT lane, red_flag_at FROM calls WHERE call_id=?", (call_id,))
-        red = row["lane"] == "red"
-        fields = {"status": "ended", "transcript": transcript, "raw": call,
-                  "ended_at": (call.get("end_timestamp") or now * 1000) / 1000, "duration_ms": call.get("duration_ms"),
-                  "disconnection_reason": call.get("disconnection_reason"), "recording_url": call.get("recording_url")}
-        if red:
-            fields["transfer_status"] = _transfer_outcome(call, red)
-            fields["red_flag_at"] = row["red_flag_at"] or fields["ended_at"]
-            fields["callback_number"] = call.get("from_number")
-        elif row["lane"] == "amber":
-            fields["callback_status"] = "waiting"
-        db.update("calls", "call_id", call_id, fields)
-        # An AI callback to someone who hung up: report the outcome on the original call.
-        parent = (call.get("metadata") or {}).get("callback_for")
-        if parent:
-            if call.get("disconnection_reason") in ("dial_no_answer", "dial_busy", "dial_failed", "voicemail_reached"):
-                outcome = "ai_no_answer"
-            else:
-                outcome = "ai_reached_red" if row["lane"] == "red" else "ai_reached_ok"
-            db.update("calls", "call_id", call_id, {"callback_for": parent})
-            db.update("calls", "call_id", parent, {"callback_status": outcome, "callback_at": now})
-            if outcome == "ai_reached_red":
-                db.raise_lane(parent, "red", "ai_callback")
-            db.event("ai_callback_" + outcome.removeprefix("ai_"), parent, "system", {"callback_call_id": call_id})
+    await db.execute(
+        """INSERT INTO calls (call_id, from_number, started_at, raw) VALUES (%s, %s, coalesce(%s, now()), %s)
+           ON CONFLICT (call_id) DO UPDATE SET raw = EXCLUDED.raw,
+             from_number = coalesce(calls.from_number, EXCLUDED.from_number),
+             started_at = coalesce(%s, calls.started_at)""",
+        call_id, call.get("from_number"), ts(call.get("start_timestamp")), call, ts(call.get("start_timestamp")),
+    )
+    await db.log_event(call_id, f"webhook_{event}")
 
+    if event == "call_started":
+        monitor.start(call_id)
+    elif event == "call_ended":
+        await db.execute(
+            """UPDATE calls SET status = 'ended', ended_at = coalesce(%s, now()), duration_ms = %s,
+                 disconnection_reason = %s, recording_url = %s WHERE call_id = %s""",
+            ts(call.get("end_timestamp")), call.get("duration_ms"), call.get("disconnection_reason"),
+            call.get("recording_url"), call_id,
+        )
+        background.add_task(after_call, call_id, call)
     elif event == "call_analyzed":
-        analysis = call.get("call_analysis") or {}
-        data = analysis.get("custom_analysis_data") or {}
-        fields = {"summary": analysis.get("call_summary"), "raw": call}
-        for k in ("intent", "cluster", "language"):
-            if data.get(k):
-                fields[k] = data[k]
-        if data.get("red_flags") and data["red_flags"] != "none":
-            flags = [f.strip() for f in str(data["red_flags"]).split(",") if f.strip()]
-            cur = db.one("SELECT red_flags FROM calls WHERE call_id=?", (call_id,))["red_flags"] or []
-            fields["red_flags"] = sorted(set(cur) | set(flags))
-        for k in ("caller_name", "callback_number"):
-            if data.get(k) and data[k] != "unknown":
-                # Retell's analysis is kept for comparison only; it never overwrites a confirmed detail.
-                d = db.one("SELECT details FROM calls WHERE call_id=?", (call_id,))["details"] or {}
-                d.setdefault(k, {"value": data[k], "status": "unconfirmed"})["analysis_value"] = data[k]
-                fields["details"] = d
-        if data.get("needs_review"):
-            fields["needs_review"] = 1
-        db.update("calls", "call_id", call_id, fields)
-        if data.get("lane"):
-            db.raise_lane(call_id, data["lane"], "retell_analysis")
-    return {"ok": True}
+        background.add_task(after_analysis, call_id, call)
+    return Response(status_code=204)
 
 
-def top_nurse_line():
-    line = db.one("SELECT * FROM nurse_lines WHERE on_duty=1 ORDER BY priority ASC, id ASC LIMIT 1")
-    return line["number"] if line else os.environ.get("NURSE_LINE", "+12139940320")
+async def after_call(call_id: str, call: dict) -> None:
+    # If the live monitor missed the call, fill the transcript from the final one.
+    has_items = await db.fetchrow("SELECT 1 FROM transcript_items WHERE call_id = %s LIMIT 1", call_id)
+    if not has_items:
+        for i, u in enumerate(call.get("transcript_object") or []):
+            await db.execute(
+                "INSERT INTO transcript_items (call_id, item_id, role, content, time_sec) VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                call_id, f"final-{i}", u.get("role"), u.get("content"), (u.get("words") or [{}])[0].get("start"),
+            )
+    await classify_and_store(call_id, "post_call", use_jev=True)
+    await handoff.finish(call_id)
 
 
-@router.post("/inbound")
-async def inbound(request: Request):
-    """Before each phone call is answered, Retell asks for this call's variables."""
-    await request.body()
-    sg = db.surge()
-    variables = {
-        "surge_banner": sg["status_message"] or "",
-        "routine_callback_window": sg["routine_window"],
-        "priority_callback_window": sg["priority_window"],
-        "nurse_line": top_nurse_line(),
-    }
-    if sg["status_message"]:
-        variables["incident_status"] = sg["status_message"]
-    return {"call_inbound": {"dynamic_variables": variables}}
+async def after_analysis(call_id: str, call: dict) -> None:
+    analysis = call.get("call_analysis") or {}
+    data = analysis.get("custom_analysis_data") or {}
+    await db.execute(
+        """UPDATE calls SET status = 'analyzed', summary = %s,
+             cluster = coalesce(cluster, %s), intent = coalesce(intent, %s),
+             needs_review = needs_review OR coalesce(%s, false),
+             recording_url = coalesce(recording_url, %s)
+           WHERE call_id = %s""",
+        analysis.get("call_summary"), data.get("cluster"), data.get("intent"), data.get("needs_review"),
+        call.get("recording_url"), call_id,
+    )
+    await db.raise_lane(call_id, data.get("lane"), "retell post-call analysis")
+
+    # Retell's analysis values are kept for comparison only; they never fill the official fields.
+    for field in ("caller_name", "callback_number"):
+        value = data.get(field)
+        if value and value != "unknown":
+            row = await db.fetchrow(
+                """UPDATE calls SET details = jsonb_set(details, ARRAY[%s],
+                     coalesce(details -> %s, '{}'::jsonb) || jsonb_build_object('analysis_value', %s::text), true)
+                   WHERE call_id = %s RETURNING details -> %s ->> 'value' AS transcript_value""",
+                field, field, value, call_id, field,
+            )
+            if row and row["transcript_value"] and not same_value(field, row["transcript_value"], value):
+                await db.execute("UPDATE calls SET needs_review = true WHERE call_id = %s", call_id)
+                await db.log_event(call_id, "analysis_mismatch", {"field": field, "transcript": row["transcript_value"], "analysis": value})
+    await handoff.finish(call_id)  # again, in case the analysis raised the lane to red
+    await recordings.download(call_id, call.get("recording_url"))

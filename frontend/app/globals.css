@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+
+  --color-page: #e8eff6;
+  --color-navy: #121826;
+  --color-navy-2: #1f2637;
+  --color-navy-3: #2b3448;
+  --color-ink: #111827;
+  --color-ink-2: #374151;
+  --color-muted: #6b7280;
+  --color-line: #e6e9ee;
+  --color-hair: #f0f2f5;
+  --color-soft: #f3f5f7;
+  --color-band: #f7f8fa;
+
+  --color-blue: #1a87d6;
+  --color-blue-ink: #11609a;
+  --color-blue-tint: #eaf4fc;
+  --color-blue-line: #cde3f5;
+  --color-yellow: #f6c35b;
+  --color-purple-ink: #7a3fa3;
+  --color-purple-tint: #f3eefb;
+
+  /* Lane marks (bars, stripes, chart segments). Validated as a set for colour-vision
+     separation; text never wears these, it stays in ink with the mark beside it. */
+  --color-lane-red: #d42a2a;
+  --color-lane-amber: #e09a1a;
+  --color-lane-green: #2e8b57;
+
+  /* Lane chips and alert surfaces: tint background + dark ink text. */
+  --color-red-ink: #991b1b;
+  --color-red-tint: #fef1f1;
+  --color-red-line: #f6c8c8;
+  --color-amber-ink: #92400e;
+  --color-amber-tint: #fff7eb;
+  --color-amber-line: #f5d9a8;
+  --color-green-ink: #2f7a35;
+  --color-green-tint: #eefaef;
+
+  --animate-pulse-soft: pulse-soft 1.4s ease-in-out infinite;
+  --animate-toast-in: toast-in 0.18s ease-out;
+  --animate-drawer-in: drawer-in 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-fade-in: fade-in 0.15s ease-out;
+
+  @keyframes pulse-soft {
+    50% {
+      opacity: 0.25;
+    }
+  }
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -6px);
+    }
+  }
+  @keyframes drawer-in {
+    from {
+      opacity: 0;
+      transform: translateX(24px);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+}
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+}
+
+body {
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

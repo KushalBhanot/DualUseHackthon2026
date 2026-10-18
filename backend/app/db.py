@@ -1,180 +1,66 @@
-"""SQLite storage. Same tables as backend_plan.md, kept in one file so the demo needs no Docker."""
-import json
-import os
-import sqlite3
-import threading
-import time
+"""Postgres access: one async pool, plain SQL, rows as dicts."""
 
-DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "..", "night_ledger.db"))
+from typing import Any
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS calls (
-  call_id TEXT PRIMARY KEY,
-  source TEXT NOT NULL DEFAULT 'retell',
-  scenario TEXT,
-  status TEXT NOT NULL DEFAULT 'live',
-  from_number TEXT,
-  started_at REAL NOT NULL,
-  ended_at REAL,
-  duration_ms INTEGER,
-  disconnection_reason TEXT,
-  lane TEXT,
-  red_flags TEXT NOT NULL DEFAULT '[]',
-  cluster TEXT,
-  intent TEXT,
-  reason TEXT,
-  urgency INTEGER,
-  caller_name TEXT,
-  callback_number TEXT,
-  needs_review INTEGER NOT NULL DEFAULT 0,
-  rules_result TEXT,
-  jev_result TEXT,
-  details TEXT NOT NULL DEFAULT '{}',
-  red_flag_at REAL,
-  transfer_started_at REAL,
-  transfer_ended_at REAL,
-  transfer_target TEXT,
-  transfer_status TEXT,
-  callback_status TEXT,
-  callback_attempts INTEGER NOT NULL DEFAULT 0,
-  summary TEXT,
-  recording_url TEXT,
-  transcript TEXT NOT NULL DEFAULT '[]',
-  raw TEXT
-);
-CREATE INDEX IF NOT EXISTS calls_started ON calls(started_at);
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  call_id TEXT,
-  actor TEXT NOT NULL,
-  type TEXT NOT NULL,
-  payload TEXT NOT NULL DEFAULT '{}',
-  created_at REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS suggestions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL,
-  call_id TEXT,
-  evidence TEXT NOT NULL DEFAULT '{}',
-  recommendation TEXT NOT NULL DEFAULT '{}',
-  status TEXT NOT NULL DEFAULT 'open',
-  snooze_until REAL,
-  outcome TEXT,
-  created_at REAL NOT NULL,
-  decided_at REAL
-);
-CREATE TABLE IF NOT EXISTS nurse_lines (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  label TEXT NOT NULL,
-  number TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'nurse',
-  on_duty INTEGER NOT NULL DEFAULT 1,
-  priority INTEGER NOT NULL DEFAULT 1,
-  updated_at REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS surge_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  is_on INTEGER NOT NULL DEFAULT 0,
-  switched_at REAL,
-  status_message TEXT,
-  status_cluster TEXT,
-  routine_window TEXT NOT NULL DEFAULT 'tomorrow morning between 8 and 11',
-  priority_window TEXT NOT NULL DEFAULT 'within 30 minutes'
-);
-INSERT OR IGNORE INTO surge_state (id) VALUES (1);
-"""
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import JsonbDumper
+from psycopg_pool import AsyncConnectionPool
 
-JSON_COLS = {"red_flags", "rules_result", "jev_result", "details", "transcript", "raw", "evidence", "recommendation", "payload"}
-LANE_RANK = {None: -1, "green": 0, "amber": 1, "red": 2}
+from .settings import BACKEND_DIR, DATABASE_URL
 
-_lock = threading.RLock()
-_conn = None
+# Python dicts go in as jsonb; lists stay Postgres arrays (red_flags text[]).
+psycopg.adapters.register_dumper(dict, JsonbDumper)
+
+pool: AsyncConnectionPool = None  # type: ignore[assignment]  # created by open_db() in the running loop
 
 
-def conn():
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.executescript(SCHEMA)
-        for col, typ in (("language", "TEXT"), ("neighborhood", "TEXT"), ("callback_at", "REAL"), ("callback_for", "TEXT")):
-            try:
-                _conn.execute(f"ALTER TABLE calls ADD COLUMN {col} {typ}")
-            except sqlite3.OperationalError:
-                pass  # column already there
-    return _conn
+async def open_db() -> None:
+    global pool
+    pool = AsyncConnectionPool(
+        DATABASE_URL, open=False, min_size=1, max_size=10,
+        kwargs={"row_factory": dict_row, "autocommit": True},
+    )
+    await pool.open(wait=True)
+    async with pool.connection() as conn:
+        await conn.execute((BACKEND_DIR / "schema.sql").read_text())
 
 
-def reset_connection(path=None):
-    """Point the module at a new database file (used by tests)."""
-    global _conn, DB_PATH
-    if _conn is not None:
-        _conn.close()
-    _conn = None
-    if path:
-        DB_PATH = path
+async def close_db() -> None:
+    await pool.close()
 
 
-def _decode(row):
-    if row is None:
-        return None
-    d = dict(row)
-    for k, v in d.items():
-        if k in JSON_COLS and isinstance(v, str):
-            try:
-                d[k] = json.loads(v)
-            except ValueError:
-                pass
-    return d
+async def fetch(sql: str, *args: Any) -> list[dict]:
+    async with pool.connection() as conn:
+        return await (await conn.execute(sql, args)).fetchall()
 
 
-def _encode(v):
-    return json.dumps(v) if isinstance(v, (dict, list)) else v
+async def fetchrow(sql: str, *args: Any) -> dict | None:
+    async with pool.connection() as conn:
+        return await (await conn.execute(sql, args)).fetchone()
 
 
-def q(sql, params=()):
-    with _lock:
-        return [_decode(r) for r in conn().execute(sql, params).fetchall()]
+async def execute(sql: str, *args: Any) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(sql, args)
 
 
-def one(sql, params=()):
-    with _lock:
-        return _decode(conn().execute(sql, params).fetchone())
+async def log_event(call_id: str | None, type_: str, payload: dict | None = None, actor: str = "system") -> None:
+    await execute(
+        "INSERT INTO events (call_id, actor, type, payload) VALUES (%s, %s, %s, %s)",
+        call_id, actor, type_, payload or {},
+    )
 
 
-def run(sql, params=()):
-    with _lock:
-        cur = conn().execute(sql, params)
-        return cur.lastrowid
-
-
-def insert(table, row):
-    cols = list(row)
-    sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})"
-    return run(sql, [_encode(row[c]) for c in cols])
-
-
-def update(table, key_col, key, fields):
-    if not fields:
+async def raise_lane(call_id: str, lane: str | None, why: str) -> None:
+    """Raise a call's lane (never lowers it) and log when it actually changed."""
+    if not lane:
         return
-    sets = ",".join(f"{c}=?" for c in fields)
-    run(f"UPDATE {table} SET {sets} WHERE {key_col}=?", [_encode(v) for v in fields.values()] + [key])
-
-
-def event(type_, call_id=None, actor="system", payload=None, at=None):
-    insert("events", {"call_id": call_id, "actor": actor, "type": type_, "payload": payload or {}, "created_at": at or time.time()})
-
-
-def raise_lane(call_id, new_lane, why, actor="system"):
-    """The one-way rule: the system can only move a call up. Returns True if it moved."""
-    call = one("SELECT lane FROM calls WHERE call_id=?", (call_id,))
-    if call is None or LANE_RANK.get(new_lane, -1) <= LANE_RANK.get(call["lane"], -1):
-        return False
-    update("calls", "call_id", call_id, {"lane": new_lane})
-    event("lane_raised", call_id, actor, {"from": call["lane"], "to": new_lane, "why": why})
-    return True
-
-
-def surge():
-    return one("SELECT * FROM surge_state WHERE id=1")
+    row = await fetchrow(
+        """UPDATE calls c SET lane = lane_max(c.lane, %s)
+           FROM (SELECT lane AS old FROM calls WHERE call_id = %s) prev
+           WHERE c.call_id = %s RETURNING prev.old, c.lane""",
+        lane, call_id, call_id,
+    )
+    if row and row["old"] != row["lane"]:
+        await log_event(call_id, "lane_raised", {"from": row["old"], "to": row["lane"], "why": why})

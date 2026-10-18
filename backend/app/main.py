@@ -1,56 +1,55 @@
+"""Night Ledger backend: FastAPI app."""
+
 import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
-from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.staticfiles import StaticFiles
 
-load_dotenv()
-
-from fastapi import FastAPI  # noqa: E402
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-
-from . import api, db, sim, webhooks  # noqa: E402
-from .supervisor import engine  # noqa: E402
-
-INTERVAL = float(os.environ.get("ENGINE_INTERVAL_S", "5"))
-
-
-async def _engine_loop():
-    while True:
-        try:
-            engine.run_once()
-        except Exception as e:  # keep the board alive if one check fails
-            print("engine error:", e)
-        await asyncio.sleep(INTERVAL)
+from . import api, db, inbound, sim, webhooks
+from .details import tools
+from .settings import SUPERVISOR_ENGINE
+from .supervisor import engine
+from .supervisor import routes as supervisor_routes
 
 
 @asynccontextmanager
-async def lifespan(app):
-    db.conn()
-    sim.seed_nurse_lines()
-    # Public demo: a fresh instance starts with a recent surge night already on the board.
-    demo = os.environ.get("DEMO_SEED")
-    if demo and not db.one("SELECT call_id FROM calls LIMIT 1"):
-        sim.backfill(demo, int(os.environ.get("DEMO_SEED_COUNT", "45")), minutes=12)
-        # Show the scenario's night-time clock instead of the server's (UTC on most hosts).
-        import time as _t
-        from .scenarios import SCENARIOS
-        sim.STATE.update({"scenario": demo, "running": False, "started_at": _t.time(),
-                          "clock_start": SCENARIOS[demo]["clock"] + 12 * 60, "inserted": 0, "total": 0})
-    task = asyncio.create_task(_engine_loop())
+async def lifespan(app: FastAPI):
+    await db.open_db()
+    loop = asyncio.create_task(engine.run_forever()) if SUPERVISOR_ENGINE else None
+    # Public demo: a fresh instance starts with a recent surge already on the board.
+    demo = os.getenv("DEMO_SEED")
+    if demo and not await db.fetchrow("SELECT 1 FROM calls LIMIT 1"):
+        await sim.start(sim.Start(scenario=demo, mode="instant", seed=7))
     yield
-    task.cancel()
-    sim.stop()
+    await sim.stop()
+    if loop:
+        loop.cancel()
+        with suppress(asyncio.CancelledError):
+            await loop
+    await db.close_db()
 
 
-app = FastAPI(title="Night Ledger", lifespan=lifespan)
-app.include_router(api.router)
+app = FastAPI(title="Night Ledger backend", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024)  # the board is polled every few seconds
 app.include_router(webhooks.router)
+app.include_router(inbound.router)
+app.include_router(tools.router)
+app.include_router(supervisor_routes.router)
+app.include_router(api.router)
+app.include_router(sim.router)
 
 
 @app.get("/health")
-def health():
+async def health():
+    await db.fetchrow("SELECT 1")
     return {"ok": True}
 
 
-app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")
+# The built Next.js board (frontend/, `STATIC_EXPORT=1 next build`), served on the same origin as /api.
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+if WEB_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

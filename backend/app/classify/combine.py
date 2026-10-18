@@ -1,37 +1,50 @@
-"""Combine classifier outputs. The higher lane always wins, and nothing here lowers a lane."""
-import os
+"""Merge rules, Jev and the stored state into one result. The higher lane always wins."""
 
-LANE_RANK = {None: -1, "green": 0, "amber": 1, "red": 2}
-JEV_MIN_CONFIDENCE = float(os.environ.get("JEV_MIN_CONFIDENCE", "0.6"))
+from ..settings import JEV_MIN_CONFIDENCE
+from .labels import higher_lane, lane_rank
 
-
-def highest(*lanes):
-    return max(lanes, key=lambda l: LANE_RANK.get(l, -1))
+JEV_RED_FLAG_MIN = 0.8
+JEV_CONFUSED_MIN = 0.7
 
 
-def combine(rules: dict | None, model: dict | None, retell_lane: str | None = None, stored_lane: str | None = None) -> dict:
-    """rules: output of rules.classify. model: {'lane','confidence','red_flag_present'} from Jev or the agent.
+def combine(rules: dict, jev: dict | None, current_lane: str | None = None, analysis_lane: str | None = None) -> dict:
+    jev = jev or {}
+    jev_ok = jev.get("lane") is not None and (jev.get("confidence") or 0) >= JEV_MIN_CONFIDENCE
 
-    Returns the final lane plus review flags. A low-confidence model result is ignored for the lane
-    but still marks the call for review.
-    """
-    rules = rules or {}
-    model = model or {}
-    model_lane = model.get("lane") if model.get("confidence", 0) >= JEV_MIN_CONFIDENCE else None
-    rules_miss = bool(model.get("red_flag_present", 0) >= 0.8 and not rules.get("red_flags"))
-    lanes = [rules.get("lane"), model_lane, retell_lane, stored_lane]
-    if rules_miss:
-        lanes.append("red")
-    final = highest(*lanes)
-    rr, mr = LANE_RANK.get(rules.get("lane"), -1), LANE_RANK.get(model.get("lane"), -1)
-    model_under_triage = rr > mr >= 0
-    needs_review = bool(
-        (model and model.get("confidence", 1) < JEV_MIN_CONFIDENCE)
-        or (rr >= 0 and mr >= 0 and abs(rr - mr) > 1)
+    red_flags = list(rules.get("red_flags") or [])
+    jev_red = (jev.get("red_flag_present") or 0) >= JEV_RED_FLAG_MIN
+    if jev_red and jev.get("red_flag") and jev["red_flag"] not in red_flags:
+        red_flags.append(jev["red_flag"])
+    rules_miss = jev_red and not rules.get("red_flags")
+
+    reason = rules.get("reason") or (jev.get("reason") if jev_ok else None)
+    confused = (jev.get("caller_confused") or 0) >= JEV_CONFUSED_MIN
+    if confused and not reason:
+        reason = "confused_or_unclear"
+
+    lane = higher_lane(
+        current_lane,
+        analysis_lane,
+        rules.get("lane"),
+        jev.get("lane") if jev_ok else None,
+        "red" if jev_red else None,
+        "amber" if confused else None,
     )
+
+    needs_review = False
+    if jev:
+        if jev.get("lane") is not None and not jev_ok:
+            needs_review = True
+        if rules.get("lane") and jev.get("lane") and abs(lane_rank(rules["lane"]) - lane_rank(jev["lane"])) > 1:
+            needs_review = True
+
+    use_jev_cluster = jev.get("cluster") and (jev.get("cluster_confidence") or 0) >= 0.5
     return {
-        "lane": final,
-        "rules_miss": rules_miss,
-        "model_under_triage": model_under_triage,
+        "lane": lane,
+        "red_flags": red_flags,
+        "reason": reason,
+        "cluster": jev["cluster"] if use_jev_cluster else rules.get("cluster"),
+        "urgency": jev.get("urgency"),
         "needs_review": needs_review,
+        "rules_miss": rules_miss,
     }
