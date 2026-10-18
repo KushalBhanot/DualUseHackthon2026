@@ -1,5 +1,7 @@
 # Night Ledger: Backend Plan (first iteration)
 
+**Status:** built in `backend/` (see `backend/README.md` to run it). 51 tests pass, and the simulated scenarios work end to end. Not yet tested on a live Retell call. The section [Changed during implementation](#changed-during-implementation) at the end lists where the build differs from the original plan.
+
 ## Goal
 
 The Retell agent already exists (`retell/ladder.mjs`, deployed with `retell/deploy.sh`), but nothing stores calls yet. This backend adds:
@@ -68,6 +70,8 @@ Rules are instant, free and predictable. They run on every live transcript updat
 
 These are plain keyword/regex lists, unit tested.
 
+**Negation:** every caller answers the safety question ("no, nobody has chest pain"), so a match is ignored when a "no / not / nobody" word comes earlier in the same clause. Clauses split at `. , ; ! ?` and "but", so "oh no, my wife just fainted" still fires and "No. But my chest feels tight" fires on the second sentence.
+
 ### 2. Jev (`app/classify/jev.py`)
 
 [Jev](https://docs.typesafe.ai/api) is TypeSafe AI's classification model. It doesn't generate text: you send the transcript plus a set of questions, and it returns one typed answer per question with probabilities. We call it with one HTTP request, `POST https://api.typesafe.ai/v1/systemone` (`Authorization: Bearer $TYPESAFE_API_KEY`). The model is pinned to `jev-1.13.0` so tuned thresholds keep working.
@@ -118,7 +122,9 @@ Questions sent in each request (`state` = the transcript so far):
 | `hospital_name` | Fuzzy match against the list of local hospitals and clinics | The matched name |
 | `medication_name` | Fuzzy match against a short list of common medications. If nothing matches, the caller spells it | Name, then spelled |
 
-The lists (insurers, Harbor General doctors, local hospitals, medications) live in a Python file, `app/details/directory.py`, with demo data. The same lists are added to the agent's `boosted_keywords` so Retell's speech-to-text hears them better.
+The lists (insurers, Harbor General doctors, local hospitals, medications) live in one JSON file, `backend/app/details/directory.json`, with demo data. The backend matches against it, and `retell/ladder.mjs` reads the same file to add the names to the agent's `boosted_keywords`, so Retell's speech-to-text hears them better.
+
+**Callback number from caller ID:** if the agent asks "Is the number you're calling from the best one?" and the caller says yes, `capture_detail` uses the caller ID (`method: caller_id`) and reads it back for confirmation like any other number.
 
 ### The capture-and-confirm loop
 
@@ -166,6 +172,8 @@ Add one rule to `general_prompt`:
 
 Also add the two tools to `callback_routine` and `person_soon`, and replace each "read back the number" step in those prompts with this loop.
 
+These tools and rule 9 are only added when `TOOLS_URL` is set. Without it, `ladder.mjs` builds the agent as before, and the agent reads details back itself.
+
 **Later option:** if spelling slows calls down too much, a small text model (e.g. Claude Haiku) could copy names out of the transcript, with a check that the name really appears there.
 
 ## Sidecar steering (`app/monitor.py`)
@@ -176,6 +184,10 @@ When a red flag is first detected (by the rules, or by Jev above the threshold):
 3. Log `context_injected`.
 
 Each flag fires once per call. If the monitor socket drops, it reconnects once; `transcript_snapshot` resends everything.
+
+**How the monitor knows the agent's state:** Retell shows state changes as tool calls named `transition_to_<state>`, the same ones `retell/lastcall.mjs` prints. The monitor reads those (and `node_transition` items, if present) to set the lane and to know when the agent is already in `handoff_now`.
+
+**If the monitor misses a call:** on `call_ended`, if no live transcript was stored, the backend fills `transcript_items` from Retell's final transcript, so post-call classification and the red-flag alert still work.
 
 ## Red-flag calls: nurse lines and transfer outcome (`app/handoff.py`)
 
@@ -242,9 +254,9 @@ Thresholds live in one config file (`app/supervisor/config.py`), so nursing lead
 ### 2. Status message for every caller
 
 - **Templates, not new wording.** Wording approved on a calm day for likely events (power outage, fire, earthquake, IT outage) lives in `app/supervisor/messages.py`. Each template is tied to a cluster (`outage`, …).
-- **Suggestion:** when one cluster is ≥ 40% of calls in the last 10 min (at least 5 calls), the backend suggests the matching template, for example *"The ER is open on backup power. We can't share patient information by phone."* The supervisor activates it as is, or edits it first. The active text, edited or not, is saved in `surge_state.status_message`.
+- **Suggestion:** when one cluster is ≥ 30% of calls in the last 10 min (at least 5 calls), the backend suggests the matching template, for example *"Harbor General's emergency room is open and running on backup power."* The supervisor activates it as is, or edits it first. The active text, edited or not, is saved in `surge_state.status_message`, and the event records whether it was edited.
 - **How every caller hears it:** through Retell's **inbound call webhook** (`POST /retell/inbound`).
-  - Before each phone call is answered, Retell asks our backend for that call's variables. We return `surge_banner` (the active message, or `""`), `incident_status`, the callback windows, and `nurse_line` (see Red-flag calls).
+  - Before each phone call is answered, Retell asks our backend for that call's variables. We return `surge_banner` (the active message, or `""`), the callback windows (the surge windows while surge mode is on), and `nurse_line` (see Red-flag calls). `incident_status` stays the agent's default.
   - It works from the very next call, with no redeploy.
   - If our backend is down, Retell falls back to the agent's default variables after 3 tries.
 - **Where it plays:** in the greeting, as **one sentence** right after "I'm an automated assistant…" and before the safety questions. Outage callers hear the answer within seconds, and the safety screen still comes before any other question. *Check this placement with whoever owns the clinical rules.*
@@ -258,20 +270,22 @@ The math is simple and visible. It uses the last 30 min of calls, and the superv
 | **Nurses** (phones and callbacks) | Nurse minutes needed per hour = red calls/h × `RED_MIN` (10) + amber callbacks/h × `AMBER_MIN` (8). Nurses needed = ceil(minutes ÷ 60 ÷ 0.8 utilization), minus `NURSES_ON_PHONES`. Also triggers if the oldest amber caller has waited past the 15-min target, or if 2+ red calls in 10 min ended `no_answer` | *"Call in 2 nurses: 14 callers in 'A person soon', oldest waiting 22 min (target 15)."* |
 | **Doctors** (ER) | **Rough signal only.** Phone calls can't measure how full the ER is. Tiers are based on the rate of red-flag injury and illness calls: ≥ 6/h → "consider 1–2 ER doctors", ≥ 15/h → "consider 3+" | *"Consider calling in 1–2 ER doctors: 9 injury red-flag calls in 30 min (normal ≈ 0)."* |
 
+**"Oldest amber caller waiting":** v1 has no "callback done" button yet, so the engine treats amber calls from the last 60 min as the waiting queue (`AMBER_LOOKBACK_MIN`).
+
 Accepting a staffing suggestion only **records** the decision as an event. Actually paging staff is out of scope for v1. A new suggestion opens only when the number goes up, so the supervisor isn't asked the same thing every 15 s.
 
 ## Database (`schema.sql`): 6 tables
 
 | Table | What it holds |
 |---|---|
-| `calls` | One row per call. **Identity:** `call_id`, `source` (`retell`/`simulated`), `scenario`, `status`, `from_number`, `started_at`, `ended_at`, `duration_ms`, `disconnection_reason`. **Supervisor fields:** `lane`, `red_flags[]`, `cluster`, `intent`, `reason`, `urgency`, `caller_name`, `callback_number`, `needs_review`. **Classifiers:** `rules_result` jsonb, `jev_result` jsonb. **Details:** `details` jsonb. **Red-flag handoff:** `red_flag_at`, `transfer_started_at`, `transfer_ended_at`, `transfer_target`, `transfer_status`. **Post-call:** `summary`, `recording_url`, `recording` (bytea audio), `raw` jsonb (latest webhook `call` object, which includes the final transcript and Retell's analysis) |
+| `calls` | One row per call. **Identity:** `call_id`, `source` (`retell`/`simulated`), `scenario`, `status`, `from_number`, `started_at`, `ended_at`, `duration_ms`, `disconnection_reason`. **Supervisor fields:** `lane`, `red_flags[]`, `cluster`, `intent`, `reason`, `urgency`, `caller_name`, `callback_number`, `callback_source` (`confirmed` / `caller_id`), `needs_review`. **Classifiers:** `rules_result` jsonb, `jev_result` jsonb. **Details:** `details` jsonb. **Red-flag handoff:** `red_flag_at`, `transfer_started_at`, `transfer_ended_at`, `transfer_target`, `transfer_status`. **Post-call:** `summary`, `recording_url`, `recording` (bytea audio), `raw` jsonb (latest webhook `call` object, which includes the final transcript and Retell's analysis) |
 | `transcript_items` | Live transcript, upserted by `(call_id, item_id)`, since Retell re-sends a growing turn under the same id. Roles: user, agent, tool call, `node_transition`, `injected` |
-| `events` | One log for everything: `id`, `call_id` (nullable), `actor` (`system`/`supervisor`), `type`, `payload` jsonb, `created_at`. System types: webhooks, `red_flag_detected`, `context_injected`, `lane_raised`, `rules_miss`, `stt_model_mismatch`, `detail_confirmed`, `detail_rejected`. Supervisor types: surge on/off, message activated, suggestion decided, red alert resolved, nurse line changed, lane lowered |
+| `events` | One log for everything: `id`, `call_id` (nullable), `actor` (`system`/`supervisor`), `type`, `payload` jsonb, `created_at`. System types: webhooks, `inbound_variables`, `monitor_connected` / `monitor_error`, `red_flag_detected`, `context_injected` / `context_inject_failed`, `lane_raised`, `rules_miss`, `transfer_started`, `transfer_result`, `red_not_connected`, `detail_not_found`, `stt_model_mismatch`, `confirm_disagreement` (the agent said "confirmed" but the caller's words didn't), `detail_confirmed`, `detail_rejected`, `analysis_mismatch`, `recording_saved` / `recording_failed`. Supervisor types: surge on/off, message activated, suggestion decided, red alert resolved, nurse line changed, lane lowered |
 | `suggestions` | `id`, `type` (`surge_mode`/`status_message`/`staffing_nurses`/`staffing_doctors`/`red_not_connected`), `call_id` (for red alerts), `evidence` jsonb (the numbers shown), `recommendation` jsonb, `status` (`open`/`accepted`/`snoozed`/`dismissed`/`resolved`/`expired`), `snooze_until`, `created_at`, `decided_at` |
 | `nurse_lines` | `id`, `label`, `number` (E.164), `role`, `on_duty`, `priority`, `updated_at` |
-| `surge_state` | One row: `on`, `switched_at`, `status_message` (active text or null), surge callback windows |
+| `surge_state` | One row: `surge_on`, `switched_at`, `status_message` (active text or null), normal and surge callback windows |
 
-**Lane rule:** a lane only ever goes up in SQL. During the call, node transitions set it: `handoff_now` → red, `person_soon` → amber, `info_status`/`callback_routine` → green. Nothing in the code lowers a lane.
+**Lane rule:** a lane only ever goes up in SQL, through the `lane_max(old, new)` function in `schema.sql`. During the call, node transitions set it: `handoff_now` → red, `person_soon` → amber, `info_status`/`callback_routine` → green. Nothing in the code lowers a lane.
 
 ## API for the future frontend (`app/api.py`)
 
@@ -293,7 +307,7 @@ Accepting a staffing suggestion only **records** the decision as an event. Actua
 ## Simulated emergencies (`app/seed.py`)
 
 ```bash
-uv run python -m app.seed serious_earthquake --count 40 [--drip 3] [--classify] [--jev] [--reset]
+uv run python -m app.seed serious_earthquake --count 40 [--drip 3] [--classify] [--jev] [--reset] [--seed 7]
 ```
 
 - **Scenarios:** `serious_earthquake`, `big_fire`, `small_fire`, `small_earthquake`, `tuesday`. Call templates are ported from `ui/night-ledger.html` (`SURGE`, `CHEST`, `TUESDAY`) and `solution_scenarios.md`.
@@ -302,7 +316,9 @@ uv run python -m app.seed serious_earthquake --count 40 [--drip 3] [--classify] 
 - Simulated red calls get a `transfer_status`. Most are `connected`; a few are `no_answer`, so `red_not_connected` alerts show on the board.
 - **Details:** each simulated call gets a `details` value. Most fields are `confirmed`; a few are `unconfirmed` or have a speech-model mismatch, so the board shows both states.
 - **`--classify`:** runs the rules on each fake transcript. **`--jev`:** also calls Jev, so the demo shows real classifier output, not just pre-set labels.
-- **`--reset`:** deletes only simulated rows.
+- **`--drip` ramps up:** the first 4 calls come in 3× slower, then the surge hits. The seed runs the supervisor check after each call, so suggestions appear without waiting for the 15 s loop.
+- **`--reset`:** deletes the simulated calls, the supervisor suggestions they caused, and switches surge mode and the status message off, for a clean demo. Real Retell calls are kept.
+- **`--seed 7`:** a fixed random seed, for a demo that plays the same every time.
 
 ## Files
 
@@ -314,33 +330,37 @@ uv run python -m app.seed serious_earthquake --count 40 [--drip 3] [--classify] 
   - Add `{{surge_banner}}` to `begin_message`, right after the AI disclosure, and set `surge_banner: ""` in `default_dynamic_variables`.
   - Change `transfer_to_nurse`'s number from the hard-coded `NURSE_LINE` to `{{nurse_line}}`, with `nurse_line: NURSE_LINE` as the default. The 20 s ring time and the "hang up and call 911" line stay as they are.
 - `.gitignore`: add `backend/.env` and `backend/.venv/`.
+- New `retell/connect.sh`: connects the live agent to the local backend in one step (see Run order).
 
 **New `backend/` folder:**
 ```
 backend/
-  pyproject.toml          fastapi, uvicorn, psycopg[binary,pool], retell-sdk, websockets, httpx, python-dotenv, rapidfuzz, dateparser, pytest
-  docker-compose.yml      postgres:16
-  .env.example            DATABASE_URL, RETELL_API_KEY, TYPESAFE_API_KEY, JEV_MODEL, JEV_MIN_CONFIDENCE, NURSE_LINE
-  schema.sql
+  pyproject.toml          fastapi, uvicorn, psycopg[binary,pool], retell-sdk, websockets, httpx, python-dotenv, rapidfuzz, dateparser; pytest, pytest-asyncio
+  docker-compose.yml      postgres:16 (or the docker run line in README.md)
+  .env.example            DATABASE_URL, RETELL_API_KEY, TYPESAFE_API_KEY, JEV_MODEL, JEV_MIN_CONFIDENCE, NURSE_LINE, VERIFY_RETELL_SIGNATURE
+  schema.sql              6 tables + lane_max()
+  README.md               how to run it
   app/
-    main.py  db.py  webhooks.py  monitor.py  recordings.py  api.py  seed.py
-    classify/    rules.py  jev.py  combine.py
-    details/     extract.py (digits, spelling, dates, fuzzy+Jev)  readback.py  tools.py (the two tool endpoints)  directory.py (lists)
+    main.py  settings.py  db.py  retell_auth.py (signature check)
+    webhooks.py  monitor.py  handoff.py  inbound.py  recordings.py  api.py  seed.py
+    classify/    labels.py  rules.py  jev.py  combine.py  service.py (classify a stored call and save)
+    details/     directory.json (lists)  extract.py  readback.py  confirm.py (yes/no from the caller's words)  tools.py
     supervisor/  config.py (thresholds)  messages.py (status templates)  engine.py (15 s check)  routes.py
-    inbound.py   Retell inbound webhook → per-call variables (incl. top on-duty nurse line)
-    handoff.py   transfer outcome tracking, red_not_connected alerts
-  tests/
-    test_rules.py  test_combine.py  test_extract.py  test_confirm.py  test_engine.py
+  tests/                  their own database, ledger_test
+    test_rules.py  test_combine.py  test_extract.py  test_confirm.py  test_live.py  test_engine.py  test_api.py
 ```
 
 ## Run order
 
 1. `cd backend && cp .env.example .env`, then fill in the keys.
-2. `docker compose up -d`, then `uv sync`, then `uv run uvicorn app.main:app --reload`.
-3. Open a public tunnel to port 8000: `cloudflared tunnel --url http://localhost:8000` or `ngrok http 8000`.
-4. `cd retell && WEBHOOK_URL=https://<tunnel>/retell/webhook TOOLS_URL=https://<tunnel>/retell/tools S2S_MODEL=gpt-realtime-2.1 ./deploy.sh`, then publish the agent version (deploy only updates the draft).
-5. Buy a phone number if there isn't one yet (`retell/README.md`). A phone call is needed so transfer and SMS work.
-6. On that number, set **Inbound Webhook URL** to `https://<tunnel>/retell/inbound` (dashboard → Phone Numbers). This is per number, not per agent.
+2. Start Postgres (`docker compose up -d`, or the `docker run` line in `backend/README.md` if your Docker has no Compose), then `uv sync`, then `uv run uvicorn app.main:app --reload`.
+3. `cd retell && ./connect.sh`. One script does steps a–d; re-run it whenever the tunnel restarts:
+   - a. opens a public tunnel to port 8000 and reads its URL. It tries cloudflared, then falls back to localtunnel (fixed name `night-ledger-<user>.loca.lt`), because some networks block `trycloudflare.com` and ngrok,
+   - b. runs `deploy.sh` with `WEBHOOK_URL`, `TOOLS_URL` and `S2S_MODEL=gpt-realtime-2.1` pointing at the tunnel,
+   - c. publishes the agent version,
+   - d. sets the agent's phone number, **+12139283405**, to answer with this agent and to call `https://<tunnel>/retell/inbound` before each call.
+
+   `S2S_MODEL= ./connect.sh` uses the text model instead.
 
 ## Testing
 
@@ -378,3 +398,35 @@ backend/
    - about 30 s after the call, the summary, `lane='red'`, `jev_result` and the recording are in the DB,
    - `node retell/lastcall.mjs` matches what's in the DB.
 6. **If the live calls fail:** redeploy without `S2S_MODEL` and repeat. That separates an s2s problem from a backend problem.
+
+## Changed during implementation
+
+| Area | Plan said | Built |
+|---|---|---|
+| Rules | Keyword lists | Same, plus **negation per clause** so "no, nobody has chest pain" doesn't flag every call. Clauses split at commas so "oh no, my wife just fainted" still fires |
+| Known-name lists | `directory.py` | `directory.json`, shared by the backend and `ladder.mjs` (one source for matching and `boosted_keywords`) |
+| Callback number | Parsed from speech | Also: "yes, this number is fine" uses caller ID, then confirms it |
+| Detail tools | Always on | Only when `TOOLS_URL` is set; without it the agent works as before |
+| Status message threshold | 40% of calls | **30%**: in a surge callers spread over ~9 topics, and outage was ~30% in the earthquake scenario, so 40% never fired. One line in `supervisor/config.py` |
+| Inbound webhook | Returned `incident_status` | Returns `surge_banner`, callback windows, `nurse_line`; `incident_status` stays the agent default |
+| Amber waiting time | Oldest amber caller | No "callback done" button yet, so amber calls from the last 60 min count as waiting |
+| Surge prompt text | — | Both numbers ("N calls … M about outage") use the same 3-min window |
+| Monitor | `node_transition` items | Also reads `transition_to_<state>` tool calls, which is how Retell shows state changes |
+| Missed monitor | — | On `call_ended`, the final transcript fills in if nothing was stored live |
+| Extra events | — | `confirm_disagreement`, `analysis_mismatch`, `detail_not_found`, `transfer_result`, `monitor_error`, `context_inject_failed` |
+| Seed | `--reset` deletes simulated rows | Also clears demo suggestions and switches surge mode / message off. Added `--seed` and a ramp-up for `--drip` |
+| Tests | — | Run in their own database (`ledger_test`), so they never touch demo data |
+| Postgres | `docker compose up -d` | This machine's Docker has no Compose plugin; README has a `docker run` line too |
+| Connecting Retell | Manual deploy, publish, dashboard setting | `retell/connect.sh` does tunnel + deploy + publish + phone number in one step |
+| Voice | `11labs-Adrian` | S2S models only accept Retell's OpenAI preset voices, so `ladder.mjs` uses `openai-Adrian` when `S2S_MODEL` is set (confirmed by Retell's 400 error on the first deploy). Text model keeps `11labs-Adrian`; `VOICE_ID` overrides |
+| Tunnel | cloudflared or ngrok | The build network blocks both (`api.trycloudflare.com` and ngrok connections are reset). `connect.sh` falls back to localtunnel, which gets through |
+
+### Still to confirm on the first live call
+
+The backend logs the raw values for each of these, so any parser fix should be small.
+
+- Whether Update Live Call works on an `s2s_model` agent (if not: `S2S_MODEL= ./connect.sh` for the text model).
+- The field names Retell's monitor socket uses for tool calls, tool results and state changes.
+- The text of the transfer tool's result, and `disconnection_reason` after a successful transfer (the backend assumes it contains "transfer").
+- Whether Retell's tool request (`call.transcript_object`) carries the speech-to-text transcript on an s2s agent.
+- Whether an empty `{{surge_banner}}` disappears cleanly from the greeting.
