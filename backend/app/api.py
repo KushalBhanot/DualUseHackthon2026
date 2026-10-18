@@ -1,15 +1,18 @@
 """Read and decision endpoints for the supervisor board."""
+import html
 import statistics
 import time
+from collections import Counter
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from . import db, sim
 from .classify.combine import LANE_RANK
 from .classify.rules import REASON_WEIGHT
-from .scenarios import SCENARIOS
-from .supervisor import engine
+from .scenarios import LANGUAGES, SCENARIOS
+from .supervisor import callbacks, engine
 from .supervisor.messages import TEMPLATES
 
 router = APIRouter(prefix="/api")
@@ -29,7 +32,60 @@ def _row(c, now):
         "transfer_status": c["transfer_status"], "callback_status": c["callback_status"], "needs_review": bool(c["needs_review"]),
         "source": c["source"], "disconnection_reason": c["disconnection_reason"],
         "model_lane": (c.get("jev_result") or {}).get("lane"), "rules_lane": (c.get("rules_result") or {}).get("lane"),
+        "language": c.get("language") or "en", "neighborhood": c.get("neighborhood"),
     }
+
+
+CLUSTER_LABEL = {"outage": "outage and \"are you open?\"", "family": "looking for family", "help": "offers to help", "media": "media",
+                 "scheduling": "appointments", "billing": "billing", "medication": "medication", "mental_health": "distress",
+                 "child": "children under 2", "injury_or_illness": "injury or illness", "other": "other"}
+
+
+def _clock(t):
+    s = sim.STATE
+    if s.get("started_at"):
+        v = (s["clock_start"] + (t - s["started_at"])) % 86400
+    else:
+        lt = time.localtime(t)
+        v = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+    return f"{int(v // 3600):02d}:{int(v // 60 % 60):02d}"
+
+
+def hotspots(calls, now, window_s=900):
+    spots = {}
+    for c in calls:
+        if c["started_at"] < now - window_s or not c.get("neighborhood"):
+            continue
+        e = spots.setdefault(c["neighborhood"], {"place": c["neighborhood"], "count": 0, "red": 0, "flags": Counter(), "clusters": Counter(), "first": c["started_at"]})
+        e["count"] += 1
+        e["red"] += c["lane"] == "red"
+        e["flags"].update(c.get("red_flags") or [])
+        e["clusters"][c.get("cluster") or "other"] += 1
+        e["first"] = min(e["first"], c["started_at"])
+    out = []
+    for e in sorted(spots.values(), key=lambda e: -(e["red"] * 5 + e["count"])):
+        out.append({"place": e["place"], "count": e["count"], "red": e["red"], "flags": [f for f, _ in e["flags"].most_common(3)],
+                    "top": [k for k, _ in e["clusters"].most_common(2)], "first": e["first"], "first_clock": _clock(e["first"])})
+    return out
+
+
+def ic_brief(now=None):
+    """A plain-text brief the supervisor can send to incident command. Facts only, from the calls table."""
+    now = now or time.time()
+    calls = db.q("SELECT * FROM calls WHERE started_at >= ?", (now - 900,))
+    spots = hotspots(calls, now)
+    sg = db.surge()
+    not_connected = sum(1 for c in calls if c["transfer_status"] in ("no_answer", "caller_hung_up", "never_started"))
+    lines = [f"Night Ledger brief for incident command, {_clock(now)}. Harbor General after-hours line, last 15 min: "
+             f"{len(calls)} calls, {sum(1 for c in calls if c['lane'] == 'red')} red flags."]
+    for s in spots[:3]:
+        flags = f", red flags: {', '.join(f.replace('_', ' ') for f in s['flags'])}" if s["flags"] else ""
+        topics = " and ".join(CLUSTER_LABEL.get(k, k) for k in s["top"])
+        lines.append(f"- {s['place']}: {s['count']} callers ({s['red']} red{flags}). Mostly {topics}. First report {s['first_clock']}.")
+    if not_connected:
+        lines.append(f"- {not_connected} red-flag caller{'s' if not_connected > 1 else ''} did not reach a nurse and were told to call 911.")
+    lines.append(f"- Status message playing to callers: {'yes' if sg['status_message'] else 'no'}. Surge mode: {'on' if sg['is_on'] else 'off'}.")
+    return {"text": "\n".join(lines), "hotspots": spots[:6], "generated_at": now}
 
 
 def board(now=None):
@@ -81,6 +137,9 @@ def board(now=None):
         "clusters": sorted(clusters.values(), key=lambda e: -e["count"]),
         "volume": volume,
         "kpis": kpis,
+        "hotspots": hotspots(calls, now)[:6],
+        "languages": dict(Counter(c.get("language") or "en" for c in calls if c["started_at"] >= now - 3600)),
+        "callbacks": callbacks.summary(now),
     }
 
 
@@ -297,3 +356,90 @@ def sim_reset():
     sim.stop()
     sim.reset()
     return sim_state()
+
+
+@router.get("/ic-brief")
+def get_ic_brief():
+    return ic_brief()
+
+
+@router.post("/ic-brief/sent")
+def ic_brief_sent():
+    b = ic_brief()
+    db.event("ic_brief_sent", None, "supervisor", {"text": b["text"]})
+    return {"ok": True}
+
+
+DECISION_TEXT = {
+    "surge_on": "Switched surge mode on", "surge_off": "Switched surge mode off", "status_message_cleared": "Stopped the status message",
+    "ic_brief_sent": "Sent a brief to incident command", "nurse_line_added": "Added a nurse line", "nurse_line_changed": "Changed a nurse line",
+    "callback_reached": "Called back an amber caller: reached", "callback_no_answer": "Called back an amber caller: no answer",
+}
+SUGGESTION_TEXT = {"surge_mode": "surge mode prompt", "status_message": "status message", "staffing_nurses": "nurse staffing",
+                   "staffing_doctors": "ER doctor staffing", "red_not_connected": "red caller not connected",
+                   "amber_unreachable": "unreachable amber caller", "callback_unreachable": "unreachable hang-up caller"}
+
+
+@router.get("/report", response_class=HTMLResponse)
+def report(download: bool = False):
+    """After-action report, written from the log. Nothing here is generated by a model."""
+    now = time.time()
+    calls = db.q("SELECT * FROM calls WHERE started_at >= ? ORDER BY started_at", (now - WINDOW_S,))
+    events = db.q("SELECT * FROM events WHERE created_at >= ? ORDER BY created_at", (now - WINDOW_S,))
+    a = analytics(120)
+    cb = callbacks.summary(now)
+    e = html.escape
+    start = calls[0]["started_at"] if calls else now
+    scen = SCENARIOS.get(sim.STATE.get("scenario") or "", {}).get("label", "Live line")
+    langs = Counter(c.get("language") or "en" for c in calls)
+    red = [c for c in calls if c["lane"] == "red"]
+
+    def tile(v, l):
+        return f'<div class="tile"><b>{e(str(v))}</b><span>{e(l)}</span></div>'
+
+    rows = []
+    for ev in events:
+        if ev["actor"] != "supervisor":
+            continue
+        p = ev.get("payload") or {}
+        if ev["type"] == "suggestion_decided":
+            text = f"{p.get('action', '').capitalize()}: {SUGGESTION_TEXT.get(p.get('type'), p.get('type'))}" + (f" ({p['outcome'].replace('_', ' ')})" if p.get("outcome") else "")
+        elif ev["type"] == "status_message_set":
+            text = f"Activated status message: \u201c{p.get('text', '')}\u201d"
+        elif ev["type"] == "lane_lowered":
+            text = f"Lowered a caller from {p.get('from')} to {p.get('to')}: {p.get('reason', '')}"
+        else:
+            text = DECISION_TEXT.get(ev["type"], ev["type"].replace("_", " "))
+        rows.append(f"<tr><td>{_clock(ev['created_at'])}</td><td>{e(text)}</td><td>K. Mensah</td></tr>")
+    sys_rows = []
+    for ev in events:
+        if ev["type"] in ("red_flag_detected", "model_under_triage", "transfer_no_answer", "suggestion_opened", "ai_callback_reached_red", "ai_callback_failed"):
+            p = ev.get("payload") or {}
+            label = {"red_flag_detected": f"Red flag: {', '.join(f.replace('_', ' ') for f in p.get('flags', []))}", "model_under_triage": f"Rules raised a call the model labelled {p.get('model')}",
+                     "transfer_no_answer": "Red transfer not answered, caller told to call 911", "suggestion_opened": f"Suggested: {SUGGESTION_TEXT.get(p.get('type'), p.get('type'))}",
+                     "ai_callback_reached_red": "AI callback found a red flag, transferred to a nurse", "ai_callback_failed": "AI callback unanswered twice"}[ev["type"]]
+            sys_rows.append(f"<tr><td>{_clock(ev['created_at'])}</td><td>{e(label)}</td></tr>")
+    spot_rows = "".join(f"<tr><td>{e(s['place'])}</td><td>{s['count']}</td><td>{s['red']}</td><td>{e(', '.join(f.replace('_', ' ') for f in s['flags']) or '-')}</td><td>{s['first_clock']}</td></tr>"
+                        for s in hotspots(calls, now, WINDOW_S)[:8])
+    open_items = "".join(f"<li>{e(SUGGESTION_TEXT.get(s['type'], s['type']))}</li>" for s in engine.open_suggestions()) or "<li>None</li>"
+    lang_txt = ", ".join(f"{LANGUAGES.get(k, k)} {v}" for k, v in langs.most_common())
+    body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Night Ledger after-action report</title><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>body{{margin:0;background:#E8EFF6;font-family:Manrope,system-ui,sans-serif;color:#111827}}main{{max-width:960px;margin:24px auto;background:#fff;border-radius:24px;padding:36px 40px;border:1px solid #DCE4EE}}
+h1{{margin:0;font-size:28px}}h2{{font-size:17px;margin:28px 0 10px}}.sub{{color:#6B7280;margin-top:6px}}.tiles{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:20px}}
+.tile{{background:#F6F8FA;border-radius:14px;padding:12px 14px;display:flex;flex-direction:column}}.tile b{{font-size:24px}}.tile span{{font-size:13px;color:#6B7280}}
+table{{width:100%;border-collapse:collapse;font-size:14px}}th{{text-align:left;background:#F7F8FA;color:#6B7280;font-weight:600;padding:8px 10px}}td{{padding:9px 10px;border-top:1px solid #F0F2F5;vertical-align:top}}
+.note{{font-size:12px;color:#6B7280;margin-top:28px}}@media print{{body{{background:#fff}}main{{border:0;margin:0}}}}</style></head><body><main>
+<h1>After-action report</h1><div class="sub">Night Ledger · Harbor General after-hours line · {e(scen)} · {_clock(start)} to {_clock(now)} · written from the call log</div>
+<div class="tiles">{tile(len(calls), 'calls')}{tile(f"{a['lane_mix']['red']} / {a['lane_mix']['amber']} / {a['lane_mix']['green']}", 'now / a person soon / can wait')}
+{tile('-' if a['red_median_handoff_s'] is None else str(a['red_median_handoff_s']) + ' s', 'red flag to transfer, median (target 10 s)')}{tile(f"{sum(1 for c in red if c['transfer_status'] == 'no_answer')}", 'red callers told to call 911')}
+{tile(cb['hung_up'], 'hung up before an answer')}{tile(cb['reached_ok'] + cb['reached_red'], 'reached again by AI callback')}{tile(cb['reached_red'], 'red flags found on callback')}{tile(len(langs) - (1 if 'en' in langs else 0), 'languages besides English')}</div>
+<h2>Supervisor decisions</h2><table><tr><th>Time</th><th>Decision</th><th>By</th></tr>{''.join(rows) or '<tr><td colspan="3">No decisions recorded.</td></tr>'}</table>
+<h2>What the system flagged</h2><table><tr><th>Time</th><th>Event</th></tr>{''.join(sys_rows[-30:]) or '<tr><td colspan="2">Nothing flagged.</td></tr>'}</table>
+<h2>Hotspots</h2><table><tr><th>Place</th><th>Callers</th><th>Red</th><th>Red flags</th><th>First report</th></tr>{spot_rows or '<tr><td colspan="5">No locations recorded.</td></tr>'}</table>
+<h2>Languages</h2><p>{e(lang_txt or 'None')}</p>
+<h2>Still open</h2><ul>{open_items}</ul>
+<p class="note">Rules and model agreed on {'-' if a['rules_model_agreement'] is None else round(a['rules_model_agreement'] * 100)}% of calls; the rules raised {a['model_under_triage']} call(s) the model under-triaged. Simulated calls are labelled as such in the log. Print this page or save it as PDF.</p>
+</main></body></html>"""
+    headers = {"Content-Disposition": 'attachment; filename="night-ledger-after-action.html"'} if download else None
+    return HTMLResponse(body, headers=headers)

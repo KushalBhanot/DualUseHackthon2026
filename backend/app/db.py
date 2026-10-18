@@ -98,6 +98,11 @@ def conn():
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.executescript(SCHEMA)
+        for col, typ in (("language", "TEXT"), ("neighborhood", "TEXT"), ("callback_at", "REAL"), ("callback_for", "TEXT")):
+            try:
+                _conn.execute(f"ALTER TABLE calls ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError:
+                pass  # column already there
     return _conn
 
 

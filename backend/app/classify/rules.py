@@ -41,6 +41,14 @@ CLUSTERS = {
     "injury_or_illness": [r"\bcut\b", r"broke", r"hurt", r"fell", r"bleed", r"breath", r"chest", r"wound"],
 }
 
+# A small LA gazetteer, so live calls can be placed on the hotspot list. Longest names first.
+NEIGHBORHOODS = sorted([
+    "Altadena", "Pasadena", "Sierra Madre", "La Cañada Flintridge", "Pacific Palisades", "Malibu", "Topanga", "Brentwood",
+    "Wilmington", "San Pedro", "Harbor City", "Carson", "Long Beach", "Torrance", "Lomita", "Gardena", "Compton",
+    "Northridge", "Van Nuys", "Reseda", "Sylmar", "Boyle Heights", "East LA", "Koreatown", "Downtown", "Hollywood",
+    "South LA", "Watts", "Inglewood", "Santa Monica", "Venice", "Culver City", "Glendale", "Burbank", "Echo Park",
+], key=len, reverse=True)
+
 REASON_WEIGHT = {
     "child_under_2": 5, "confused_or_unclear": 4, "mental_health": 4, "family_locating": 3,
     "recent_discharge": 3, "hospice": 3, "vulnerable_caller": 3, "repeat_caller": 3, "asked_for_person": 2,
@@ -78,4 +86,6 @@ def classify(caller_text: str, transcription_confidence: float | None = None) ->
         cluster = "child"
     elif reason == "mental_health" and not flags:
         cluster = "mental_health"
-    return {"lane": lane, "red_flags": flags, "person_soon": soon, "reason": reason, "cluster": cluster}
+    low = text.lower()
+    place = next((n for n in NEIGHBORHOODS if n.lower() in low), None)
+    return {"lane": lane, "red_flags": flags, "person_soon": soon, "reason": reason, "cluster": cluster, "place": place}

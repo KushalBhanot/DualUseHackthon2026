@@ -6,10 +6,11 @@ import math
 import time
 
 from .. import db
+from . import callbacks
 from . import config as C
 from .messages import CLUSTER_TEMPLATE, TEMPLATES
 
-UNSNOOZABLE = {"red_not_connected", "amber_unreachable"}
+UNSNOOZABLE = {"red_not_connected", "amber_unreachable", "callback_unreachable"}
 
 
 def _open(type_, call_id=None):
@@ -174,9 +175,20 @@ def check_amber_unreachable(now):
              {"options": ["try_again", "welfare_check", "close"]}, call_id=c["call_id"], now=now)
 
 
+def check_callback_unreachable(now):
+    for c in db.q("SELECT * FROM calls WHERE callback_status='callback_failed'"):
+        if db.one("SELECT id FROM suggestions WHERE type='callback_unreachable' AND call_id=? AND status IN ('open','snoozed')", (c["call_id"],)):
+            continue
+        _new("callback_unreachable", {"caller_name": c["caller_name"], "callback_number": c["callback_number"] or c["from_number"],
+                                      "intent": c["intent"], "attempts": c["callback_attempts"], "neighborhood": c["neighborhood"]},
+             {"options": ["try_again", "welfare_check", "closed"]}, call_id=c["call_id"], now=now)
+
+
 def run_once(now=None):
     now = now or time.time()
     _expire_snoozes(now)
+    callbacks.run(now)
+    check_callback_unreachable(now)
     st = line_stats(now)
     check_red_not_connected(now)
     check_amber_unreachable(now)
@@ -186,7 +198,7 @@ def run_once(now=None):
     return st
 
 
-PRIORITY = {"red_not_connected": 0, "amber_unreachable": 1, "surge_mode": 2, "status_message": 3, "staffing_nurses": 4, "staffing_doctors": 5}
+PRIORITY = {"red_not_connected": 0, "amber_unreachable": 1, "callback_unreachable": 1, "surge_mode": 2, "status_message": 3, "staffing_nurses": 4, "staffing_doctors": 5}
 
 
 def open_suggestions():
@@ -216,7 +228,10 @@ def decide(sid, action, outcome=None, text=None, actor="supervisor"):
     elif action == "resolve":
         db.update("suggestions", "id", sid, {"status": "resolved", "outcome": outcome, "decided_at": now})
         if s["call_id"]:
-            db.update("calls", "call_id", s["call_id"], {"callback_status": outcome or "resolved"})
+            if s["type"] == "callback_unreachable" and outcome == "try_again":
+                db.update("calls", "call_id", s["call_id"], {"callback_status": "ai_queued", "callback_attempts": 0, "callback_at": now})
+            else:
+                db.update("calls", "call_id", s["call_id"], {"callback_status": outcome or "resolved"})
     else:
         return False, "Unknown action"
     db.event("suggestion_decided", s["call_id"], actor, {"id": sid, "type": s["type"], "action": action, "outcome": outcome})

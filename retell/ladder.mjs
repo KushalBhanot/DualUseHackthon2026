@@ -272,6 +272,7 @@ const post_call_analysis_data = [
   { type: "enum", name: "cluster", description: "Topic for grouping similar calls on the supervisor board.", choices: ["outage", "family", "help", "media", "scheduling", "billing", "medication", "mental_health", "child", "injury_or_illness", "other"], required: true },
   { type: "string", name: "intent", description: "One short sentence: why they called, in plain words.", examples: ["Asking if the ER is open with the power out", "Looking for brother after the building collapse"], required: true },
   { type: "string", name: "escalation_reason", description: "Why the call was moved above step 2, or 'none'.", required: true },
+  { type: "enum", name: "language", description: "Main language the caller spoke.", choices: ["en", "es", "ko", "hy", "zh", "vi", "tl", "other"] },
   { type: "string", name: "caller_name", description: "Caller's name if given, else 'unknown'." },
   { type: "string", name: "callback_number", description: "Callback number confirmed by the caller, else 'unknown'." },
   { type: "string", name: "callback_window", description: "Callback window promised to the caller, or 'none'." },

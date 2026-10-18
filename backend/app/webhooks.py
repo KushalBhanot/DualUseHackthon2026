@@ -49,6 +49,8 @@ def _classify_and_store(call_id, transcript, retell_lane=None):
         fields["red_flags"] = r["red_flags"]
     if r["cluster"] and r["cluster"] != "other":
         fields["cluster"] = r["cluster"]
+    if r.get("place"):
+        fields["neighborhood"] = r["place"]
     db.update("calls", "call_id", call_id, fields)
     if comb["rules_miss"]:
         db.event("rules_miss", call_id, "system", {"model": model})
@@ -89,12 +91,24 @@ async def webhook(request: Request):
         elif row["lane"] == "amber":
             fields["callback_status"] = "waiting"
         db.update("calls", "call_id", call_id, fields)
+        # An AI callback to someone who hung up: report the outcome on the original call.
+        parent = (call.get("metadata") or {}).get("callback_for")
+        if parent:
+            if call.get("disconnection_reason") in ("dial_no_answer", "dial_busy", "dial_failed", "voicemail_reached"):
+                outcome = "ai_no_answer"
+            else:
+                outcome = "ai_reached_red" if row["lane"] == "red" else "ai_reached_ok"
+            db.update("calls", "call_id", call_id, {"callback_for": parent})
+            db.update("calls", "call_id", parent, {"callback_status": outcome, "callback_at": now})
+            if outcome == "ai_reached_red":
+                db.raise_lane(parent, "red", "ai_callback")
+            db.event("ai_callback_" + outcome.removeprefix("ai_"), parent, "system", {"callback_call_id": call_id})
 
     elif event == "call_analyzed":
         analysis = call.get("call_analysis") or {}
         data = analysis.get("custom_analysis_data") or {}
         fields = {"summary": analysis.get("call_summary"), "raw": call}
-        for k in ("intent", "cluster"):
+        for k in ("intent", "cluster", "language"):
             if data.get(k):
                 fields[k] = data[k]
         if data.get("red_flags") and data["red_flags"] != "none":

@@ -32,6 +32,11 @@ async def lifespan(app):
     demo = os.environ.get("DEMO_SEED")
     if demo and not db.one("SELECT call_id FROM calls LIMIT 1"):
         sim.backfill(demo, int(os.environ.get("DEMO_SEED_COUNT", "45")), minutes=12)
+        # Show the scenario's night-time clock instead of the server's (UTC on most hosts).
+        import time as _t
+        from .scenarios import SCENARIOS
+        sim.STATE.update({"scenario": demo, "running": False, "started_at": _t.time(),
+                          "clock_start": SCENARIOS[demo]["clock"] + 12 * 60, "inserted": 0, "total": 0})
     task = asyncio.create_task(_engine_loop())
     yield
     task.cancel()

@@ -1,5 +1,7 @@
 // Night Ledger supervisor board. Plain JS, polls /api/state, renders into #main.
-const S = { view: 'board', data: null, sel: null, detail: null, q: '', callsLane: '', calls: [], nurse: [], templates: null, edits: {} };
+const S = { view: 'board', data: null, sel: null, detail: null, q: '', callsLane: '', calls: [], nurse: [], templates: null, edits: {}, brief: null };
+const LANG = { en: 'English', es: 'Spanish', ko: 'Korean', hy: 'Armenian', zh: 'Mandarin', vi: 'Vietnamese', tl: 'Tagalog' };
+const CB = { ai_queued: ['grey', 'AI callback queued'], scheduled: ['grey', 'AI callback queued'], ai_calling: ['blue', 'AI calling back…'], ai_reached_ok: ['green', 'Reached · fine'], ai_reached_red: ['red', 'Reached · red flag, transferred'], ai_no_answer: ['amber', 'No answer · retrying'], callback_failed: ['red', 'Unreachable twice'], welfare_check: ['grey', 'Welfare check requested'], closed: ['grey', 'Closed'], try_again: ['grey', 'Trying again'] };
 const LANE = { red: 'Now', amber: 'A person soon', green: 'Can wait' };
 const LANE_RULE = { red: 'Red flag · warm transfer under 10 s', amber: 'Never automated · callback within 15 min', green: 'Status message · scheduled callback' };
 const CLUSTER = { outage: 'Outage and "are you open?"', family: 'Looking for a family member', help: 'Offers to help', media: 'Media requests',
@@ -46,7 +48,7 @@ function render() {
   const editing = a && $('#main').contains(a) && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT');
   if (!editing) $('#main').innerHTML = ({ board: viewBoard, calls: viewCalls, analytics: viewAnalytics, setup: viewSetup, demo: viewDemo }[S.view] || viewBoard)();
   $('#respond').innerHTML = S.view === 'board' ? respondBar() : '';
-  $('#drawer').innerHTML = S.sel && S.detail ? drawer(S.detail) : '';
+  $('#drawer').innerHTML = S.brief ? briefModal(S.brief) : (S.sel && S.detail ? drawer(S.detail) : '');
   const urgent = (S.data?.suggestions || []).some((x) => x.type === 'red_not_connected');
   $('#navdot').hidden = !urgent;
   document.querySelectorAll('.side [data-view]').forEach((b) => b.setAttribute('aria-current', b.dataset.view === S.view ? 'page' : 'false'));
@@ -62,15 +64,21 @@ function viewBoard() {
   const b = d.board, sg = d.surge, sim = d.sim;
   const scen = sim.scenario ? ` · ${esc(sim.scenarios[sim.scenario])}` : '';
   const right = `
+    <a class="pill" href="/api/report" target="_blank" rel="noopener">After-action report</a>
     <span class="surgebadge ${sg.is_on ? 'on' : 'off'}">${sg.is_on ? '<span class="pulse"></span>Surge mode on' : 'Surge mode off'}</span>
     <label class="search"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="#6B7280" stroke-width="2"/><path d="M20 20l-4-4" stroke="#6B7280" stroke-width="2" stroke-linecap="round"/></svg><span class="sr">Filter calls</span><input id="q" type="search" placeholder="Filter callers, intents…" value="${esc(S.q)}"><span class="kbd">⌘ K</span></label>`;
   return header('Night shift, K. Mensah', `Harbor General · after-hours line · <span class="tab">${clock(simClock())}</span>${scen}`, right)
-    + decisions(d.suggestions) + statusCard(sg) + kpis(b) + lanes(b) + `<div class="row">${watch(b, sg)}${volume(b)}</div>`;
+    + decisions(d.suggestions) + statusCard(sg) + kpis(b) + lanes(b) + `<div class="row">${hotspotsCard(b)}${callbacksCard(b.callbacks)}</div>` + `<div class="row">${watch(b, sg)}${volume(b)}${languagesCard(b.languages)}</div>`;
 }
 
 function decisions(list) {
   if (!list.length) return '';
-  return `<section class="decisions" aria-label="Decisions waiting for you">${list.map(decision).join('')}</section>`;
+  // Red alerts first. Show two in full; fold the rest so the other decisions stay visible.
+  const reds = list.filter((s) => s.type === 'red_not_connected'), rest = list.filter((s) => s.type !== 'red_not_connected');
+  const shown = S.showAllRed ? reds : reds.slice(0, 2), hidden = S.showAllRed ? [] : reds.slice(2);
+  const fold = hidden.length ? `<div class="decision redalert" style="padding:12px 20px"><b style="color:#991B1B">+${hidden.length} more red caller${hidden.length > 1 ? 's' : ''} not connected</b>
+    <span style="flex:1 1 300px">${hidden.map((s) => esc(s.evidence.caller_name || 'Caller')).join(' · ')}</span><button class="pill sm" data-act="showred">Show all</button></div>` : '';
+  return `<section class="decisions" aria-label="Decisions waiting for you">${shown.map(decision).join('')}${fold}${rest.map(decision).join('')}</section>`;
 }
 
 function ev(v, l) { return `<div class="ev"><b class="tab">${esc(v)}</b><span>${esc(l)}</span></div>`; }
@@ -87,6 +95,10 @@ function decision(s) {
   if (s.type === 'amber_unreachable') {
     return `<div class="decision amberalert" role="alert"><div class="body"><h2>${esc(e.caller_name || 'Caller')} didn't pick up twice</h2><div>${esc(REASON[e.reason] || e.reason || '')} · ${esc(e.intent || '')} · <span class="tab">${phone(e.callback_number)}</span></div></div>
       <div class="actions"><button class="pill dark" data-act="decide" data-id="${s.id}" data-action="resolve" data-outcome="try_again">Try again</button><button class="pill" data-act="decide" data-id="${s.id}" data-action="resolve" data-outcome="welfare_check">Ask police for a welfare check</button><button class="pill" data-act="decide" data-id="${s.id}" data-action="resolve" data-outcome="closed">Close</button></div></div>`;
+  }
+  if (s.type === 'callback_unreachable') {
+    return `<div class="decision amberalert" role="alert"><div class="body"><h2>${esc(e.caller_name || 'Caller')} hung up and didn't answer 2 AI callbacks</h2><div>${esc(e.intent || '')}${e.neighborhood ? ' · ' + esc(e.neighborhood) : ''} · <span class="tab">${phone(e.callback_number)}</span></div><div class="muted" style="font-size:13px">Only a person can close this.</div></div>
+      <div class="actions"><button class="pill dark" data-act="decide" data-id="${s.id}" data-action="resolve" data-outcome="try_again">Try again</button><button class="pill" data-act="decide" data-id="${s.id}" data-action="resolve" data-outcome="welfare_check">Ask police for a welfare check</button><button class="pill" data-act="decide" data-id="${s.id}" data-action="resolve" data-outcome="closed">Close</button><button class="pill sm" data-act="open" data-id="${esc(s.call_id)}">Handoff Card</button></div></div>`;
   }
   if (s.type === 'surge_mode') {
     return `<div class="decision surge"><div class="body"><span class="muted" style="font-size:13px;font-weight:700">Decision 1 · suggested by the line, needs you</span><h2>Switch on surge mode?</h2>
@@ -146,10 +158,12 @@ function callRow(c) {
   (c.red_flags || []).forEach((f) => chips.push(`<span class="chip red-soft">${esc(FLAG[f] || f)}</span>`));
   if (c.lane === 'amber' && c.reason) chips.push(`<span class="chip amber">${esc(REASON[c.reason] || c.reason)}</span>`);
   if (c.transfer_status) { const [cl, l] = TRANSFER[c.transfer_status] || ['grey', c.transfer_status]; chips.push(`<span class="chip ${cl === 'green' ? 'green' : 'red'}">${esc(l)}</span>`); }
-  if (c.callback_status && c.lane !== 'red' && c.callback_status !== 'waiting') chips.push(`<span class="chip grey">Callback: ${esc(c.callback_status.replace('_', ' '))}</span>`);
-  if (c.disconnection_reason === 'user_hangup') chips.push('<span class="chip grey">Hung up</span>');
+  if (c.callback_status && c.lane !== 'red' && c.callback_status !== 'waiting' && c.disconnection_reason !== 'user_hangup' && !CB[c.callback_status]) chips.push(`<span class="chip grey">Callback: ${esc(c.callback_status.replace('_', ' '))}</span>`);
+  if (c.language && c.language !== 'en') chips.push(`<span class="chip purple">${esc(LANG[c.language] || c.language)}</span>`);
+  if (c.disconnection_reason === 'user_hangup') { const cb = CB[c.callback_status]; chips.push(cb ? `<span class="chip ${cb[0]}">Hung up · ${esc(cb[1])}</span>` : '<span class="chip grey">Hung up</span>'); }
+  if (c.neighborhood) chips.push(`<span class="muted" style="font-size:12px">${esc(c.neighborhood)}</span>`);
   const rank = { green: 0, amber: 1, red: 2 };
-  if (c.model_lane && rank[c.lane] > rank[c.model_lane]) chips.push(`<span class="chip blue" title="The model said ${esc(c.model_lane)}; the rules raised it">Rules caught it</span>`);
+  if (c.model_lane && c.rules_lane === c.lane && rank[c.lane] > rank[c.model_lane]) chips.push(`<span class="chip blue" title="The model said ${esc(c.model_lane)}; the rules raised it">Rules caught it</span>`);
   if (c.needs_review) chips.push('<span class="chip grey">Review</span>');
   if (c.source === 'retell') chips.push('<span class="chip purple">Live call</span>');
   return `<button class="callrow ${S.sel === c.call_id ? 'sel' : ''}" data-act="open" data-id="${esc(c.call_id)}">
@@ -203,6 +217,46 @@ function respondBar() {
     <button class="pill ${d.surge.is_on ? 'ghost-dark' : 'amber'}" data-act="surge" data-on="${d.surge.is_on ? 0 : 1}">${d.surge.is_on ? 'Switch surge mode off' : 'Switch on surge mode'}</button></div>`;
 }
 
+
+function hotspotsCard(b) {
+  const spots = b.hotspots || [];
+  const max = Math.max(1, ...spots.map((s) => s.count));
+  const rows = spots.map((s) => `<div class="cluster"><div><div class="nm">${esc(s.place)}</div><div class="muted" style="font-size:13px"><b class="tab" style="color:#111827">${s.count}</b> callers · ${s.red ? `<span style="color:#991B1B;font-weight:700">${s.red} red${s.flags.length ? ' (' + esc(s.flags.map((f) => FLAG[f] || f).join(', ')) + ')' : ''}</span>` : '0 red'} · first <span class="tab">${esc(s.first_clock)}</span></div></div>
+    <div style="width:140px;height:8px;border-radius:4px;background:#F3F5F7"><div style="width:${Math.round((s.count / max) * 100)}%;height:8px;border-radius:4px;background:${s.red ? '#DC2626' : '#1A87D6'}"></div></div></div>`).join('');
+  return `<section class="card" style="flex:1.3 1 460px;min-width:0;overflow:hidden"><div class="card-h"><span class="ttl">Hotspots · where calls come from <span class="info">i</span></span><span class="grow"></span><span class="muted" style="font-size:13px;font-weight:600">last 15 min</span></div>
+    ${rows || '<div class="empty">Places appear as callers mention them.</div>'}
+    <div style="padding:14px 20px;border-top:1px solid #F0F2F5;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="muted" style="font-size:13px;flex:1 1 220px">Callers are your earliest sensor. Send incident command what they're reporting.</span><button class="pill dark" data-act="brief">Brief for incident command</button></div></section>`;
+}
+
+function callbacksCard(cb) {
+  if (!cb) return '';
+  const stat = (v, l, col) => `<div class="ev" style="background:#F6F8FA"><b class="tab" style="${col ? 'color:' + col : ''}">${v}</b><span>${l}</span></div>`;
+  const rows = cb.recent.slice(0, 5).map((r) => { const s = CB[r.status] || ['grey', r.status || 'queued'];
+    return `<button class="callrow" data-act="open" data-id="${esc(r.call_id)}"><span class="who">${esc(r.caller_name || 'Caller')}</span><span class="chip ${s[0]}">${esc(s[1])}</span><span class="what">${esc(r.intent || '')}${r.neighborhood ? ' · ' + esc(r.neighborhood) : ''}</span></button>`; }).join('');
+  return `<section class="card" style="flex:1 1 380px;min-width:0;overflow:hidden"><div class="card-h"><span class="ttl">AI callbacks to hang-ups <span class="info">i</span></span></div>
+    <div class="evidence" style="padding:0 20px 12px">${stat(cb.hung_up, 'hung up')}${stat(cb.calling + cb.queued, 'calling / queued')}${stat(cb.reached_ok + cb.reached_red, 'reached again', '#2F7A35')}${stat(cb.reached_red, 'red flags found', cb.reached_red ? '#991B1B' : '')}${stat(cb.failed, 'unreachable')}</div>
+    <div class="calls" style="max-height:260px;border-top:1px solid #F0F2F5">${rows || '<div class="empty">Nobody has hung up yet. Every hang-up under 30 s gets an AI callback.</div>'}</div></section>`;
+}
+
+function languagesCard(langs) {
+  const entries = Object.entries(langs || {}).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((n, [, v]) => n + v, 0) || 1;
+  const other = entries.filter(([k]) => k !== 'en').reduce((n, [, v]) => n + v, 0);
+  const cols = { en: '#C9D1DA', es: '#1A87D6', ko: '#C78BE8', hy: '#F6C35B', zh: '#74D47B', vi: '#5DB8F2', tl: '#E58E5A' };
+  return `<section class="card" style="flex:0.8 1 280px;min-width:0;padding-bottom:16px"><div class="card-h"><span class="ttl">Languages <span class="info">i</span></span></div>
+    <div style="padding:0 20px"><div class="v tab" style="font-size:30px;font-weight:800">${Math.round((other / total) * 100)}%</div><div class="muted" style="font-size:13px">of callers this hour spoke a language other than English, answered in their language and translated live</div>
+    <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin:12px 0">${entries.map(([k, v]) => `<span style="width:${(v / total) * 100}%;background:${cols[k] || '#9AA3B5'}"></span>`).join('')}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">${entries.map(([k, v]) => `<span class="chip grey"><span style="width:8px;height:8px;border-radius:50%;background:${cols[k] || '#9AA3B5'}"></span>${esc(LANG[k] || k)} ${v}</span>`).join('')}</div></div></section>`;
+}
+
+function briefModal(b) {
+  return `<div class="scrim" data-act="closebrief"></div><aside class="drawer" role="dialog" aria-label="Brief for incident command" style="height:auto;bottom:auto;max-height:calc(100vh - 40px)">
+    <div class="top"><div style="flex:1"><div class="muted" style="font-size:13px;font-weight:700">Facts only, from the call log · you send it</div><h2>Brief for incident command</h2></div><button class="pill sm" data-act="closebrief" aria-label="Close">✕</button></div>
+    <div class="scroll"><label class="sr" for="brieftext">Brief text</label><textarea id="brieftext" readonly style="width:100%;min-height:220px;border-radius:14px;border:1px solid var(--border);background:var(--soft);padding:12px 14px;font:14px/1.6 Manrope,sans-serif">${esc(b.text)}</textarea>
+    <span class="muted" style="font-size:13px">Paste it into the incident channel, radio log or WebEOC. Marking it sent records the decision in the after-action report.</span></div>
+    <div class="foot"><button class="pill dark" data-act="copybrief">Copy brief</button><button class="pill" data-act="sentbrief">Mark as sent to IC</button></div></aside>`;
+}
+
 // ------------------------------------------------------------------ handoff card
 function drawer(c) {
   const rr = c.rules_result || {}, m = c.jev_result || {};
@@ -224,7 +278,7 @@ function drawer(c) {
     ? `<button class="pill dark" data-act="cb" data-id="${esc(c.call_id)}" data-outcome="reached">Called back: reached</button><button class="pill" data-act="cb" data-id="${esc(c.call_id)}" data-outcome="no_answer">No answer</button>` : '';
   return `<div class="scrim" data-act="close"></div><aside class="drawer" role="dialog" aria-label="Handoff Card">
     <div class="top"><div style="flex:1;min-width:0"><div class="muted" style="font-size:13px;font-weight:700">Handoff Card · arrived ${atClock(c.started_at)}${c.source === 'simulated' ? ' · simulated' : ' · live call'}</div>
-      <h2>${esc(c.caller_name || 'Unknown caller')}</h2><div class="tab" style="font-weight:600;margin-top:2px">${phone(c.callback_number || c.from_number)}</div></div>
+      <h2>${esc(c.caller_name || 'Unknown caller')}</h2><div class="tab" style="font-weight:600;margin-top:2px">${phone(c.callback_number || c.from_number)}${c.neighborhood ? ' · ' + esc(c.neighborhood) : ''}</div>${c.language && c.language !== 'en' ? `<span class="chip purple" style="margin-top:6px">${esc(LANG[c.language] || c.language)} · translated live</span>` : ''}</div>
       <span class="chip ${c.lane === 'red' ? 'red' : c.lane === 'amber' ? 'amber' : 'green'}" style="font-size:13px;padding:6px 12px">${LANE[c.lane] || 'Classifying'}</span>
       <button class="pill sm" data-act="close" aria-label="Close">✕</button></div>
     <div class="scroll">
@@ -235,8 +289,9 @@ function drawer(c) {
         <span class="muted">Model</span><span>${m.lane ? `<b>${esc(LANE[m.lane])}</b> · ${esc(m.label || m.source || '')} ${m.confidence != null ? `<span class="tag tab">${Math.round(m.confidence * 100)}%</span>` : ''}` : '—'}</span>
         <span class="muted">Final</span><span><b>${esc(LANE[c.lane] || '—')}</b> · the higher lane wins. Only a person can lower a lane.</span></div></div>
       ${transfer}
+      ${CB[c.callback_status] ? `<div class="sec"><h3>AI callback</h3><div class="kv"><span class="muted">Status</span><span style="font-weight:700">${esc(CB[c.callback_status][1])}</span><span class="chip ${CB[c.callback_status][0]}">${c.callback_attempts} attempt${c.callback_attempts === 1 ? '' : 's'}</span></div><div class="muted" style="font-size:13px;margin-top:6px">The callback agent says it's an AI, asks "Do you need help?", and sends any red flag straight to a nurse.</div></div>` : ''}
       <div class="sec"><h3>Details</h3><div class="kv">${detail('caller_name', 'Name')}${detail('callback_number', 'Callback')}</div></div>
-      <div class="sec"><h3>What was said</h3><div class="transcript">${(c.transcript || []).map((t) => `<div class="bubble ${t.role === 'user' ? 'user' : 'agent'}"><b style="font-size:11px;letter-spacing:.06em;color:#6B7280">${t.role === 'user' ? 'CALLER' : 'AI'}</b><br>${esc(t.content)}</div>`).join('') || '<span class="muted">No transcript yet.</span>'}</div></div>
+      <div class="sec"><h3>What was said</h3><div class="transcript">${(c.transcript || []).map((t) => `<div class="bubble ${t.role === 'user' ? 'user' : 'agent'}"><b style="font-size:11px;letter-spacing:.06em;color:#6B7280">${t.role === 'user' ? 'CALLER' : 'AI'}</b><br>${esc(t.content)}${t.en ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed #C9D1DA;color:#374151"><b style="font-size:11px;color:#6B7280">ENGLISH</b> ${esc(t.en)}</div>` : ''}</div>`).join('') || '<span class="muted">No transcript yet.</span>'}</div></div>
       <div class="sec"><h3>Ladder</h3><div class="ladder">${ladder}</div></div>
       <div class="sec"><h3>Log</h3><div class="log">${events || '<span class="muted">No events.</span>'}</div></div>
     </div>
@@ -321,6 +376,11 @@ document.addEventListener('click', async (e) => {
   try {
     if (act === 'open') { S.sel = id; S.detail = await api('/api/calls/' + encodeURIComponent(id)); render(); }
     else if (act === 'close') { S.sel = null; S.detail = null; render(); }
+    else if (act === 'showred') { S.showAllRed = true; render(); return; }
+    else if (act === 'brief') { S.brief = await api('/api/ic-brief'); render(); return; }
+    else if (act === 'closebrief') { S.brief = null; render(); return; }
+    else if (act === 'copybrief') { await navigator.clipboard.writeText(S.brief?.text || '').catch(() => {}); toast('Brief copied.'); return; }
+    else if (act === 'sentbrief') { await api('/api/ic-brief/sent', { method: 'POST' }); S.brief = null; toast('Logged: brief sent to incident command.'); }
     else if (act === 'decide') {
       const body = { outcome: el.dataset.outcome || null };
       if (el.dataset.text) body.text = document.querySelector(`[data-edit="${id}"]`)?.value;
@@ -356,7 +416,7 @@ document.addEventListener('submit', async (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); S.view = 'board'; render(); $('#q')?.focus(); }
-  if (e.key === 'Escape' && S.sel) { S.sel = null; S.detail = null; render(); }
+  if (e.key === 'Escape' && (S.sel || S.brief)) { S.sel = null; S.detail = null; S.brief = null; render(); }
 });
 async function loadSetup() { S.nurse = await api('/api/nurse-lines'); S.templates = (await api('/api/status-messages')).templates; }
 

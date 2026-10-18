@@ -12,7 +12,7 @@ import uuid
 from . import db
 from .classify import rules
 from .classify.combine import combine
-from .scenarios import CHEST, FIRST, LAST, MODEL_LANE, SCENARIOS
+from .scenarios import CHEST, FIRST, LAST, MODEL_LANE, PLACES, SCENARIOS
 
 STATE = {"scenario": None, "running": False, "started_at": None, "clock_start": None, "inserted": 0, "total": 0}
 _task = None
@@ -31,7 +31,10 @@ def _pick(templates, rng):
 def make_call(tpl, scenario, at, rng, surge_on=False):
     """Build one simulated call: classify the caller's words with the real rules, combine with the model label."""
     caller_text, agent_text = tpl["q"]
-    r = rules.classify(caller_text, tpl.get("stt"))
+    en = tpl.get("en")  # live translation for non-English calls; the rules read the English
+    r = rules.classify(en[0] if en else caller_text, tpl.get("stt"))
+    places = PLACES.get(scenario) or [("Los Angeles", 1)]
+    place = tpl.get("place") or _pick([{"w": w, "p": p} for p, w in places], rng)["p"]
     label, conf = tpl["model"]
     model = {"source": "simulated_model", "label": label, "lane": MODEL_LANE.get(label, "green"), "confidence": conf}
     comb = combine(r, model)
@@ -48,9 +51,10 @@ def make_call(tpl, scenario, at, rng, surge_on=False):
         "needs_review": int(comb["needs_review"]), "rules_result": r, "jev_result": model,
         "transcript": [
             {"role": "agent", "content": "Harbor General. I'm an automated assistant, not a person, and you can ask for a person at any time. First, a quick safety check: is anyone with you having chest pain, trouble breathing, or bleeding that won't stop?", "t": 0},
-            {"role": "user", "content": caller_text, "t": 6},
-            {"role": "agent", "content": agent_text, "t": 9},
+            {"role": "user", "content": caller_text, "en": en[0] if en else None, "t": 6},
+            {"role": "agent", "content": agent_text, "en": en[1] if en else None, "t": 9},
         ],
+        "language": tpl.get("lang", "en"), "neighborhood": place,
         "details": {
             "caller_name": {"value": name, "status": "confirmed" if rng.random() > .12 else "unconfirmed"},
             "callback_number": {"value": number, "status": "caller_id" if lane == "red" else ("confirmed" if rng.random() > .1 else "unconfirmed")},
@@ -61,7 +65,7 @@ def make_call(tpl, scenario, at, rng, surge_on=False):
         call["red_flag_at"] = at + rng.uniform(5, 8)
         call["transfer_started_at"] = call["red_flag_at"] + rng.uniform(2, 5)
         call["transfer_target"] = "ED charge nurse"
-        connected = tpl.get("star") or rng.random() > 0.22
+        connected = tpl.get("star") or rng.random() > 0.12
         call["transfer_status"] = "connected" if connected else "no_answer"
         call["transfer_ended_at"] = call["transfer_started_at"] + (rng.uniform(4, 12) if connected else 20)
         call["ended_at"] = call["transfer_ended_at"] + (rng.uniform(60, 200) if connected else 6)

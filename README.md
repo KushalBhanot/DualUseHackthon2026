@@ -57,6 +57,15 @@ Tests: `uv run --group dev pytest`
 
 Real calls appear on the board with a purple **Live call** chip.
 
+## What the board does
+
+- **Surge prompt, status message, staffing:** suggestions with the numbers behind them; every action is one supervisor click, logged.
+- **Lanes and Handoff Cards:** Now / A person soon / Can wait, with rules-vs-model reasoning, transcript and transfer timing.
+- **AI callbacks to hang-ups:** every caller who hangs up within 30 s gets an AI callback that says it's an AI and asks "Do you need help?". A red flag on the callback goes straight to a nurse; two unanswered callbacks open an alert only a person can close. Live outbound calls need `RETELL_API_KEY`, `RETELL_FROM_NUMBER` and `RETELL_CALLBACK_AGENT_ID`.
+- **Hotspots and a brief for incident command:** calls grouped by place and topic over the last 15 minutes, written up as a facts-only brief the supervisor copies and marks as sent. This is the gap the Eaton fire review found: what callers reported didn't reach incident command.
+- **Language access:** callers are answered in their language; the Handoff Card shows the original and the live English translation, and the rules classify the English.
+- **After-action report:** `/api/report` writes the night up from the log: decisions with names, red handoff times, callbacks, hotspots and languages. Print or save as PDF.
+
 ## How a call is classified
 
 1. **Rules** (`backend/app/classify/rules.py`): keyword and regex lists for the 12 red flags, the person-soon reasons and topic clusters. Instant and predictable.
